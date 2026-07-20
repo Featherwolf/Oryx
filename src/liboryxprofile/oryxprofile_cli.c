@@ -30,6 +30,7 @@ static int usage(void)
 	fprintf(stderr,
 		"usage:\n"
 		"  oryxprofile resolve <dir> <game_build_hash> <device_class> <hw_tso 0|1>\n"
+		"  oryxprofile env     <dir> <game_build_hash> <device_class> <hw_tso 0|1>\n"
 		"  oryxprofile apply   <file>\n"
 		"  oryxprofile score   <file>\n");
 	return 2;
@@ -72,6 +73,31 @@ int main(int argc, char **argv)
 		if (read_profile(argv[2], &p) != 0) { fprintf(stderr, "bad profile\n"); return 1; }
 		char env[2048];
 		oryx_profile_apply_env(&p, env, sizeof(env));
+		fputs(env, stdout);
+		return 0;
+	}
+
+	/* Like resolve, but prints ONLY the export lines (for `eval` in a launcher). */
+	if (!strcmp(argv[1], "env") && argc == 6) {
+		struct oryx_profile_set set;
+		oryx_profile_set_init(&set);
+		if (oryx_profile_set_load_dir(&set, argv[2]) < 0) {
+			fprintf(stderr, "cannot read profile dir %s\n", argv[2]); return 1;
+		}
+		struct oryx_caps caps;
+		snprintf(caps.device_class, sizeof(caps.device_class), "%s", argv[4]);
+		caps.hw_tso = atoi(argv[5]);
+
+		struct oryx_profile best;
+		int rc = oryx_profile_resolve(&set, argv[3], &caps, &best);
+		oryx_profile_set_free(&set);
+		if (rc != ORYX_P_OK) {
+			fprintf(stderr, "no compatible profile for %s on %s (hw_tso=%d)\n",
+				argv[3], argv[4], caps.hw_tso);
+			return 1;
+		}
+		char env[2048];
+		oryx_profile_apply_env(&best, env, sizeof(env));
 		fputs(env, stdout);
 		return 0;
 	}

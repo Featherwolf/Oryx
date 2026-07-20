@@ -48,7 +48,9 @@ tested components exist. What builds and passes tests today:
 | `src/liboryxprofile` | Part C auto-tuning profile engine | **built & tested** (27 assertions) |
 
 Build and test everything from the repo root: `make check`. Full testing guide (host, CI, and
-the on-device Phase 0 experiment): [`TESTING.md`](TESTING.md).
+the on-device Phase 0 experiment): [`TESTING.md`](TESTING.md). Path from here to running a real
+game with an Oryx win (honest step count): [`docs/roadmap-to-device.md`](docs/roadmap-to-device.md).
+Launch wrapper that applies a tuned profile to a real game: [`tools/oryx-run.sh`](tools/oryx-run.sh).
 
 The project is gated on a single decisive experiment:
 
