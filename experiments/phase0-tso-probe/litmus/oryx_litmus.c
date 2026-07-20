@@ -125,6 +125,83 @@ static inline void barrier_full(void)
 #endif
 }
 
+/*
+ * ---- Mapping primitives (Layer A: validate the TSO->AArch64 *mapping*) -----
+ *
+ * The bare MP/SB tests above measure the hardware. Layer A instead lowers the
+ * two shared accesses using the exact instruction sequences a translator would
+ * emit for a SHARED x86 access, so the litmus outcome validates the *mapping*:
+ *
+ *   plain : STR             / LDR              weak — the untranslated baseline
+ *   rcpc  : STLR            / LDAPR            EXACT x86-TSO (needs FEAT_LRCPC, 8.3)
+ *   sc    : STLR            / LDAR             RCsc — STRONGER than TSO (over-strong)
+ *   dmb   : DMB ISHST; STR  / LDR; DMB ISHLD   EXACT x86-TSO via fences (pre-8.3)
+ *
+ * The decisive, on-device signatures (see run_layerA.sh):
+ *   - MP-forbidden (r1==1 && r2==0) must be ZERO under rcpc, sc AND dmb: all
+ *     three restore the store->store / load->load ordering x86 requires.
+ *   - SB-allowed (r0==0 && r1==0) must be NONZERO under rcpc and dmb (they keep
+ *     the W->R store-buffer relaxation TSO permits) but ZERO under sc (which
+ *     also forbids W->R). Observing SB under rcpc is the empirical proof that
+ *     LDAPR/STLR is exact-TSO, not accidentally sequentially consistent.
+ *
+ * On a non-aarch64 host these fall back to C11 atomics of matching strength so
+ * the tool builds and its control flow self-tests; the rcpc-vs-sc SB contrast
+ * is an ARM-weak-ordering phenomenon and only appears on the real device.
+ */
+enum map_kind { MAP_PLAIN = 0, MAP_RCPC, MAP_SC, MAP_DMB };
+
+#if defined(__aarch64__)
+static inline void st_plain(atomic_int *p, int v)
+{ __asm__ __volatile__("str %w0, [%1]" :: "r"(v), "r"(p) : "memory"); }
+static inline int  ld_plain(atomic_int *p)
+{ int v; __asm__ __volatile__("ldr %w0, [%1]" : "=r"(v) : "r"(p) : "memory"); return v; }
+static inline void st_release(atomic_int *p, int v)      /* STLR (rcpc + sc stores) */
+{ __asm__ __volatile__("stlr %w0, [%1]" :: "r"(v), "r"(p) : "memory"); }
+static inline int  ld_acq_sc(atomic_int *p)              /* LDAR  (RCsc acquire)    */
+{ int v; __asm__ __volatile__("ldar %w0, [%1]" : "=r"(v) : "r"(p) : "memory"); return v; }
+static inline int  ld_acq_pc(atomic_int *p)              /* LDAPR (RCpc acquire)    */
+{ int v; __asm__ __volatile__(".arch_extension rcpc\n\tldapr %w0, [%1]" : "=r"(v) : "r"(p) : "memory"); return v; }
+static inline void dmb_ishst(void){ __asm__ __volatile__("dmb ishst" ::: "memory"); }
+static inline void dmb_ishld(void){ __asm__ __volatile__("dmb ishld" ::: "memory"); }
+#else
+static inline void st_plain(atomic_int *p, int v){ atomic_store_explicit(p, v, memory_order_relaxed); }
+static inline int  ld_plain(atomic_int *p){ return atomic_load_explicit(p, memory_order_relaxed); }
+static inline void st_release(atomic_int *p, int v){ atomic_store_explicit(p, v, memory_order_release); }
+static inline int  ld_acq_sc(atomic_int *p){ return atomic_load_explicit(p, memory_order_acquire); }
+static inline int  ld_acq_pc(atomic_int *p){ return atomic_load_explicit(p, memory_order_acquire); }
+static inline void dmb_ishst(void){ atomic_thread_fence(memory_order_release); }
+static inline void dmb_ishld(void){ atomic_thread_fence(memory_order_acquire); }
+#endif
+
+static enum map_kind g_map = MAP_PLAIN;
+
+/* Lower one SHARED store/load per the selected mapping. */
+static inline void map_store(atomic_int *p, int v)
+{
+    switch (g_map) {
+    case MAP_RCPC: case MAP_SC: st_release(p, v); break;   /* STLR */
+    case MAP_DMB:  dmb_ishst(); st_plain(p, v);  break;    /* DMB ISHST; STR */
+    default:       st_plain(p, v);               break;    /* STR */
+    }
+}
+static inline int map_load(atomic_int *p)
+{
+    switch (g_map) {
+    case MAP_RCPC: return ld_acq_pc(p);                       /* LDAPR */
+    case MAP_SC:   return ld_acq_sc(p);                       /* LDAR  */
+    case MAP_DMB:  { int v = ld_plain(p); dmb_ishld(); return v; }  /* LDR; DMB ISHLD */
+    default:       return ld_plain(p);                        /* LDR */
+    }
+}
+static const char *map_name(enum map_kind m)
+{
+    switch (m) {
+    case MAP_RCPC: return "rcpc"; case MAP_SC: return "sc";
+    case MAP_DMB:  return "dmb";  default:     return "plain";
+    }
+}
+
 static inline void wait_gate(atomic_long *gate, long target)
 {
     while (atomic_load_explicit(gate, memory_order_acquire) < target)
@@ -140,13 +217,13 @@ static void *thread0(void *arg)
     for (long i = 1; i <= g_iters; i++) {
         wait_gate(&S->gate_go, i);
         if (g_test == TEST_MP) {
-            atomic_store_explicit(&S->x, 1, memory_order_relaxed);
-            if (g_fenced) barrier_full();
-            atomic_store_explicit(&S->y, 1, memory_order_relaxed);
+            map_store(&S->x, 1);
+            if (g_map == MAP_PLAIN && g_fenced) barrier_full();
+            map_store(&S->y, 1);
         } else { /* SB */
-            atomic_store_explicit(&S->x, 1, memory_order_relaxed);
-            if (g_fenced) barrier_full();
-            int r0 = atomic_load_explicit(&S->y, memory_order_relaxed);
+            map_store(&S->x, 1);
+            if (g_map == MAP_PLAIN && g_fenced) barrier_full();
+            int r0 = map_load(&S->y);
             atomic_store_explicit(&S->t0_a, r0, memory_order_relaxed);
         }
         atomic_store_explicit(&S->t0_done, i, memory_order_release);
@@ -163,15 +240,15 @@ static void *thread1(void *arg)
     for (long i = 1; i <= g_iters; i++) {
         wait_gate(&S->gate_go, i);
         if (g_test == TEST_MP) {
-            int r1 = atomic_load_explicit(&S->y, memory_order_relaxed);
-            if (g_fenced) barrier_full();
-            int r2 = atomic_load_explicit(&S->x, memory_order_relaxed);
+            int r1 = map_load(&S->y);
+            if (g_map == MAP_PLAIN && g_fenced) barrier_full();
+            int r2 = map_load(&S->x);
             atomic_store_explicit(&S->t1_a, r1, memory_order_relaxed);
             atomic_store_explicit(&S->t1_b, r2, memory_order_relaxed);
         } else { /* SB */
-            atomic_store_explicit(&S->y, 1, memory_order_relaxed);
-            if (g_fenced) barrier_full();
-            int r1 = atomic_load_explicit(&S->x, memory_order_relaxed);
+            map_store(&S->y, 1);
+            if (g_map == MAP_PLAIN && g_fenced) barrier_full();
+            int r1 = map_load(&S->x);
             atomic_store_explicit(&S->t1_a, r1, memory_order_relaxed);
         }
         atomic_store_explicit(&S->t1_done, i, memory_order_release);
@@ -189,6 +266,13 @@ static void parse_args(int argc, char **argv)
             else { fprintf(stderr, "unknown --test %s (mp|sb)\n", t); exit(2); }
         } else if (!strcmp(argv[i], "--mode") && i + 1 < argc) {
             g_fenced = !strcmp(argv[++i], "fenced");
+        } else if (!strcmp(argv[i], "--map") && i + 1 < argc) {
+            const char *m = argv[++i];
+            if      (!strcmp(m, "plain")) g_map = MAP_PLAIN;
+            else if (!strcmp(m, "rcpc"))  g_map = MAP_RCPC;
+            else if (!strcmp(m, "sc"))    g_map = MAP_SC;
+            else if (!strcmp(m, "dmb"))   g_map = MAP_DMB;
+            else { fprintf(stderr, "unknown --map %s (plain|rcpc|sc|dmb)\n", m); exit(2); }
         } else if (!strcmp(argv[i], "--iters") && i + 1 < argc) {
             g_iters = strtol(argv[++i], NULL, 10);
         } else if (!strcmp(argv[i], "--cpu-a") && i + 1 < argc) {
@@ -201,7 +285,8 @@ static void parse_args(int argc, char **argv)
             g_request_tso = 1;
         } else {
             fprintf(stderr,
-                "usage: %s [--test mp|sb] [--mode relaxed|fenced] [--iters N] "
+                "usage: %s [--test mp|sb] [--mode relaxed|fenced] "
+                "[--map plain|rcpc|sc|dmb] [--iters N] "
                 "[--cpu-a A] [--cpu-b B] [--json] [--request-tso]\n", argv[0]);
             exit(2);
         }
@@ -255,14 +340,14 @@ int main(int argc, char **argv)
     int tso_granted = atomic_load_explicit(&g_tso_granted, memory_order_relaxed);
 
     if (g_json) {
-        printf("{\"test\":\"%s\",\"mode\":\"%s\",\"iters\":%ld,\"cpu_a\":%d,"
+        printf("{\"test\":\"%s\",\"mode\":\"%s\",\"map\":\"%s\",\"iters\":%ld,\"cpu_a\":%d,"
                "\"cpu_b\":%d,\"witnesses\":%ld,\"total\":%ld,"
                "\"tso_requested\":%d,\"tso_granted\":%d}\n",
-               tname, mname, g_iters, g_cpu_a, g_cpu_b, witnesses, total,
+               tname, mname, map_name(g_map), g_iters, g_cpu_a, g_cpu_b, witnesses, total,
                g_request_tso, tso_granted);
     } else {
-        printf("test=%s mode=%s iters=%ld cpu-a=%d cpu-b=%d\n",
-               tname, mname, g_iters, g_cpu_a, g_cpu_b);
+        printf("test=%s mode=%s map=%s iters=%ld cpu-a=%d cpu-b=%d\n",
+               tname, mname, map_name(g_map), g_iters, g_cpu_a, g_cpu_b);
         if (g_request_tso) {
             if (tso_granted == 2)
                 printf("  hardware TSO: GRANTED by kernel to both threads (NO ROOT) -- "

@@ -27,6 +27,11 @@ all: oryx_litmus
 oryx_litmus: oryx_litmus.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
+# Layer A — validate the x86-TSO -> AArch64 *mapping* on the device (no root).
+# Runs plain/rcpc/sc/dmb x MP/SB and prints the exact-TSO verdict.
+layerA: oryx_litmus
+	@sh run_layerA.sh
+
 # Quick self-test: proves the binary builds and the SB control fires on the build host.
 # (On an x86 host, which is TSO, MP must be 0 and SB should be > 0.)
 selftest: oryx_litmus
@@ -36,8 +41,10 @@ selftest: oryx_litmus
 	@./oryx_litmus --test mp --mode relaxed --iters 2000000 --cpu-a 0 --cpu-b 1 || true
 	@echo "-- MP fenced (must be 0 everywhere) --"
 	@./oryx_litmus --test mp --mode fenced --iters 2000000 --cpu-a 0 --cpu-b 1 || true
+	@echo "-- mapping variants build+run (rcpc/sc/dmb; sc-vs-rcpc SB contrast is ARM-only) --"
+	@for m in rcpc sc dmb; do ./oryx_litmus --test mp --map $$m --iters 1000000 --cpu-a 0 --cpu-b 1 --json || true; done
 
 clean:
 	rm -f oryx_litmus
 
-.PHONY: all selftest clean
+.PHONY: all selftest layerA clean

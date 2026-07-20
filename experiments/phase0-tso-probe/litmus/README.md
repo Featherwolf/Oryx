@@ -17,6 +17,37 @@ adb push oryx_litmus run_phase0.sh /data/local/tmp/
 adb shell "cd /data/local/tmp && sh run_phase0.sh"
 ```
 
+## Two roles: hardware detector (Phase 0) and mapping validator (Layer A)
+
+The same binary does two jobs, selected by the `--map` flag:
+
+- **Phase 0 (`run_phase0.sh`, default `--map plain`):** measures the *bare hardware* memory
+  model on a core pair (weak vs TSO). This is Step 1 of Phase 0.
+- **Layer A (`run_layerA.sh`):** measures the *software mapping*. Each shared litmus access is
+  lowered with the exact instructions the translator emits for a SHARED access, and the outcome
+  validates that the mapping is correct — and that `LDAPR`/`STLR` is *exact* TSO. See
+  `../../../docs/validation-harness.md` Layer A. Run it with:
+
+  ```sh
+  sh run_layerA.sh                 # plain/rcpc/sc/dmb x MP/SB, prints the verdict
+  ITERS=20000000 sh run_layerA.sh  # raise if INCONCLUSIVE
+  PAIR="2:7" sh run_layerA.sh      # force a cross-cluster pair
+  ```
+
+  `--map` lowers the two shared accesses as:
+
+  | `--map` | store | load | property |
+  |---------|-------|------|----------|
+  | `plain` | `STR` | `LDR` | weak (untranslated baseline) |
+  | `rcpc`  | `STLR` | `LDAPR` | **exact x86-TSO** (needs FEAT_LRCPC, ARMv8.3) |
+  | `sc`    | `STLR` | `LDAR` | RCsc — stronger than TSO (over-strong) |
+  | `dmb`   | `DMB ISHST; STR` | `LDR; DMB ISHLD` | exact x86-TSO via fences (pre-8.3) |
+
+  Expected on Oryon: MP-forbidden is **0** for `rcpc`/`sc`/`dmb` (ordering restored), while
+  SB-allowed is **>0** for `rcpc`/`dmb` but **0** for `sc` (proving `rcpc` is exact-TSO and `sc`
+  is over-strong). On a non-aarch64 build host the primitives fall back to C11 atomics so the
+  tool still builds and self-tests; the `rcpc`-vs-`sc` SB contrast only appears on real ARM.
+
 ## The two tests, and why both are needed
 
 | Test | Threads | Witness outcome | Meaning |
