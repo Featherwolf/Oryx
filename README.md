@@ -32,8 +32,21 @@ evidence behind every load-bearing claim.
 
 ## Status
 
-**Design phase.** Nothing here ships yet. The project is gated on a single decisive
-experiment:
+**Design + early implementation.** The architecture is specified and the first shippable,
+tested components exist. What builds and passes tests today:
+
+| Component | What | State |
+|-----------|------|-------|
+| `experiments/phase0-tso-probe/litmus` | MP + SB memory-model detector + protocol | **built & validated** on host (correctly IDs x86 as TSO) |
+| `experiments/phase0-tso-probe/probe` | Oryon control-bit finder (kernel module) | written; builds against a target-device kernel |
+| `src/kmod/oryx_memmodel` | Part A per-thread hardware-TSO driver | written; builds against a target-device kernel |
+| `src/liboryxmm` | userspace TSO client for emulators | **built & tested** (fail-closed) |
+| `src/liboryxcache` | Part B content-addressed translation/shader cache | **built & tested** (28 assertions) |
+| `src/liboryxprofile` | Part C auto-tuning profile engine | **built & tested** (27 assertions) |
+
+Build and test the host components: `cd src && make check`.
+
+The project is gated on a single decisive experiment:
 
 ### → Phase 0 is the gate: [`experiments/phase0-tso-probe/`](experiments/phase0-tso-probe/)
 

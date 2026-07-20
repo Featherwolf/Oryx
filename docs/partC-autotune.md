@@ -5,6 +5,11 @@ auto-applies the winning configuration on launch.
 
 **Confidence:** pure software **[Established]**; ships first, useful before Part A exists.
 
+> **Reference implementation shipped:** [`src/liboryxprofile`](../src/liboryxprofile/)
+> implements parse/serialize, telemetry-aware ranking, capability-aware resolution, and the
+> GameNative-style applier, with a CLI, example profiles, and a passing test suite. Format
+> spec: [`docs/formats/profile.md`](formats/profile.md).
+
 ## The problem it removes
 
 Getting a demanding title to run well today means hand-assembling: the right backend
