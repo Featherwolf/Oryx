@@ -49,9 +49,46 @@ Feed the result into the [Phase 0 decision table](../README.md#step-3--the-decis
 per-thread + toggleable + stable ⇒ **PASS**, build Part A. Anything else routes to a
 fallback or a stop.
 
+## Files
+
+| File | What |
+|------|------|
+| `oryx_probe.c` | The finder module: debugfs `control`/`log` files to `dump` and `poke` candidate IMPDEF EL1 registers on a chosen CPU (via `smp_call_function_single`). |
+| `Kbuild`, `Makefile` | Build against the **target device** kernel (`make KDIR=... ARCH=arm64 CROSS_COMPILE=...`). Cannot build on an x86 host kernel. |
+| `probe_scan.sh` | Orchestrator: sweeps (register, bit), pokes each on a core, runs the litmus MP+SB tests, and flags any bit that flips WEAK→TSO. |
+
+## Concrete usage (rooted test device)
+
+```sh
+# build against the device kernel, push, and load
+make KDIR=/path/to/s26-kernel ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+adb push oryx_probe.ko probe_scan.sh /data/local/tmp/
+adb shell su -c 'insmod /data/local/tmp/oryx_probe.ko'
+
+# scan for the control bit on a chosen core pair (target=6, peer=7)
+adb shell su -c 'cd /data/local/tmp && sh probe_scan.sh 6 7'
+adb shell su -c 'cat /sys/kernel/debug/oryx_probe/log'
+
+adb shell su -c 'rmmod oryx_probe'
+```
+
+debugfs command reference (`echo '<cmd>' > /sys/kernel/debug/oryx_probe/control`):
+
+| Command | Effect |
+|---------|--------|
+| `list` | list candidate registers + indices |
+| `dump <cpu>` | read every candidate register on `<cpu>` |
+| `poke <idx> <bit> <cpu> <0\|1>` | clear/set one bit of candidate `<idx>` on `<cpu>` (logs before→after; flags RAZ/ignored bits) |
+| `clearlog` | reset the log buffer |
+
+The candidate register table in `oryx_probe.c` starts with `ACTLR_EL1`/`AIDR_EL1` and a few
+`S3_0_C15_*` IMPDEF guesses; refine those encodings as on-device RE narrows them.
+
 ## Toward a shippable interface
 
 If the probe succeeds, the production form is **not** this scanning module but the
-`PR_SET_MEM_MODEL` handler described in [Part A](../../docs/partA-hardware-tso.md): a signed
-GKI/Magisk module that sets exactly the discovered bit, only for opted-in threads, restoring
-weak ordering on context-switch away, honoring any core restriction found here.
+per-thread memory-model driver in
+[`src/kmod/oryx_memmodel`](../../src/kmod/oryx_memmodel/): it sets exactly the discovered
+`(register, bit)` for opted-in threads only, reapplies it on the correct core via a preempt
+notifier, restores weak ordering on context-switch away, and honors any core restriction
+found here. See [Part A design](../../docs/partA-hardware-tso.md).
