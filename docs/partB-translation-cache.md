@@ -7,6 +7,11 @@ cache across the whole install base.
 **Confidence:** caching model proven elsewhere (Rosetta AOT, Steam shader cache)
 **[Established]**; deterministic DBT codegen is the engineering risk **[R&D]**.
 
+> **Reference implementation shipped:** [`src/liboryxcache`](../src/liboryxcache/) implements
+> the format, content addressing, the store, and fail-closed integrity, with a CLI and a
+> passing unit-test suite (round-trip, determinism, tamper rejection). Format spec:
+> [`docs/formats/translation-unit.md`](formats/translation-unit.md).
+
 ## The enabling insight
 
 Every S26 Ultra is ISA-identical (SM8850). A translation unit or compiled shader produced on
