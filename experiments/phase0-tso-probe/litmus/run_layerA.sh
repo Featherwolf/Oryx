@@ -29,7 +29,7 @@
 # POSIX sh; no bashisms. Runs in the Android shell / Termux.
 set -eu
 
-ITERS="${ITERS:-5000000}"
+ITERS="${ITERS:-20000000}"     # SB needs a wide window; 20M ~ 1-2 min/measurement
 BIN="${BIN:-./oryx_litmus}"
 
 if [ ! -x "$BIN" ]; then
@@ -37,9 +37,16 @@ if [ ! -x "$BIN" ]; then
     make >/dev/null
 fi
 
-# --- pick a cross-cluster pair (widest store-propagation window) -------------
-pick_pair() {
+witnesses() {   # args: test map cpu_a cpu_b [iters]
+    "$BIN" --test "$1" --map "$2" --iters "${5:-$ITERS}" --cpu-a "$3" --cpu-b "$4" --json \
+        | sed -n 's/.*"witnesses":\([0-9]*\).*/\1/p'
+}
+
+# --- candidate pairs: auto cross-cluster first, then a spread of fallbacks ----
+candidate_pairs() {
     if [ -n "${PAIR:-}" ]; then echo "$PAIR"; return; fi
+    # cross-cluster (min-freq : max-freq) from cpufreq, then within-cluster and
+    # a few blind fallbacks. Whichever exposes the SB store-buffer first wins.
     freqs=""
     for d in /sys/devices/system/cpu/cpu[0-9]*; do
         [ -r "$d/cpufreq/cpuinfo_max_freq" ] || continue
@@ -47,25 +54,49 @@ pick_pair() {
         f=$(cat "$d/cpufreq/cpuinfo_max_freq" 2>/dev/null || echo 0)
         freqs="$freqs$cpu:$f\n"
     done
-    [ -n "$freqs" ] || { echo "0:4"; return; }
-    printf "%b" "$freqs" | awk -F: '
-        { f[$1]=$2; if($2>maxf)maxf=$2; if(minf==0||$2<minf)minf=$2 }
-        END {
-            slow=-1; fast=-1;
-            for (c in f) { if (f[c]==minf && slow<0) slow=c; if (f[c]==maxf && fast<0) fast=c }
-            if (slow<0) slow=0; if (fast<0) fast=1;
-            print slow":"fast;
-        }'
+    auto=""
+    if [ -n "$freqs" ]; then
+        auto=$(printf "%b" "$freqs" | awk -F: '
+            { f[$1]=$2; if($2>maxf)maxf=$2; if(minf==0||$2<minf)minf=$2 }
+            END {
+                slow=-1; fast=-1; fast2=-1;
+                for (c in f) {
+                    if (f[c]==minf && slow<0) slow=c;
+                    if (f[c]==maxf && fast<0) fast=c; else if (f[c]==maxf && fast2<0) fast2=c;
+                }
+                if (slow<0) slow=0; if (fast<0) fast=1;
+                out=slow":"fast;                          # cross-cluster
+                if (fast2>=0) out=out" "fast":"fast2;      # within fast cluster
+                print out;
+            }')
+    fi
+    # dedup while preserving order; append blind fallbacks
+    printf "%s 0:1 0:4 2:6 4:5 6:7\n" "$auto" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' '
 }
 
-witnesses() {   # args: test map cpu_a cpu_b
-    "$BIN" --test "$1" --map "$2" --iters "$ITERS" --cpu-a "$3" --cpu-b "$4" --json \
-        | sed -n 's/.*"witnesses":\([0-9]*\).*/\1/p'
-}
-
-PAIR_SEL=$(pick_pair)
-A=$(echo "$PAIR_SEL" | cut -d: -f1)
-B=$(echo "$PAIR_SEL" | cut -d: -f2)
+# --- find a pair whose PLAIN SB control fires (harness is sensitive) ----------
+SCAN_ITERS=$(( ITERS / 4 )); [ "$SCAN_ITERS" -lt 2000000 ] && SCAN_ITERS=2000000
+A=""; B=""
+if [ -n "${PAIR:-}" ]; then
+    A=$(echo "$PAIR" | cut -d: -f1); B=$(echo "$PAIR" | cut -d: -f2)
+else
+    echo "scanning core pairs for SB sensitivity (plain SB > 0) ..."
+    for p in $(candidate_pairs); do
+        pa=$(echo "$p" | cut -d: -f1); pb=$(echo "$p" | cut -d: -f2)
+        [ "$pa" = "$pb" ] && continue
+        s=$(witnesses sb plain "$pa" "$pb" "$SCAN_ITERS")
+        [ -z "$s" ] && s=0
+        printf "   pair %-5s plain SB(%s iters) = %s\n" "$pa:$pb" "$SCAN_ITERS" "$s"
+        if [ "$s" -gt 0 ] 2>/dev/null; then A=$pa; B=$pb; break; fi
+    done
+    if [ -z "$A" ]; then
+        # none fired at scan depth; fall back to the auto pair and let the full
+        # run (more iters) try — verdict logic still guards on plain SB.
+        first=$(candidate_pairs | awk '{print $1}')
+        A=$(echo "$first" | cut -d: -f1); B=$(echo "$first" | cut -d: -f2)
+        echo "   (no pair fired at scan depth; using $A:$B at full iters — raise ITERS if still INCONCLUSIVE)"
+    fi
+fi
 
 echo "=================================================================="
 echo " Project Oryx — Validation Layer A: TSO->AArch64 mapping check"
@@ -131,20 +162,23 @@ for pair in "rcpc:$mp_rcpc" "sc:$mp_sc" "dmb:$mp_dmb"; do
     fi
 done
 
-# (2) exactness signature: rcpc/dmb keep SB (W->R), sc suppresses it.
+# (2) W->R exactness signature: rcpc/dmb keep SB (W->R), sc suppresses it.
+#     NOTE: this proves ONLY the store->load (W->R) half of TSO-exactness. The
+#     multi-copy-atomicity half (IRIW/WRC) is a SEPARATE property this 2-thread
+#     test cannot see — see the caveat printed at the end.
 if gt0 "$sb_rcpc" && gt0 "$sb_dmb"; then
     if eq0 "$sb_sc"; then
-        echo " EXACTNESS CONFIRMED: rcpc SB=$sb_rcpc, dmb SB=$sb_dmb (both fire) while"
-        echo "   sc SB=0 (suppressed). LDAPR/STLR is exact x86-TSO on this silicon —"
-        echo "   it keeps the store-buffer (W->R) outcome TSO allows, and sc is"
-        echo "   provably over-strong. This is the empirical proof of the mapping."
+        echo " W->R EXACTNESS CONFIRMED: rcpc SB=$sb_rcpc, dmb SB=$sb_dmb (both fire) while"
+        echo "   sc SB=0 (suppressed). On the store->load axis LDAPR/STLR matches x86-TSO"
+        echo "   exactly (keeps the store-buffer outcome TSO allows) and sc is provably"
+        echo "   over-strong. This is HALF of exact-TSO; see the MCA caveat below."
     else
         echo " PARTIAL: rcpc/dmb keep SB (good) but sc SB=$sb_sc also fired. Expected"
         echo "   sc to suppress it; sc may be under-fenced on this core, or the pair"
         echo "   is TSO-ordered. Re-run with a wider PAIR / higher ITERS."
     fi
 else
-    echo " EXACTNESS UNPROVEN: rcpc SB=$sb_rcpc, dmb SB=$sb_dmb — expected both > 0."
+    echo " W->R EXACTNESS UNPROVEN: rcpc SB=$sb_rcpc, dmb SB=$sb_dmb — expected both > 0."
     echo "   If sc SB=$sb_sc is also 0 the pair likely isn't exposing W->R; raise"
     echo "   ITERS or choose a cross-cluster PAIR. (rcpc==sc here means the LDAPR"
     echo "   exactness win is simply not observable on this pair, not that it's"
@@ -153,8 +187,14 @@ fi
 
 echo "------------------------------------------------------------------"
 if [ "$fail" -eq 0 ]; then
-    echo " LAYER A: ordering restored by all three mappings."
-    echo "          (Exactness line above states whether the LDAPR win was observed.)"
+    echo " LAYER A: ordering restored by all three mappings (2-thread MP/SB)."
+    echo "          W->R exactness line above states whether the LDAPR win was seen."
+    echo ""
+    echo " MCA CAVEAT (do not skip before shipping rcpc): this 2-thread test does"
+    echo "   NOT cover multi-copy atomicity. Whether LDAPR/STLR keeps IRIW and WRC"
+    echo "   forbidden (which x86-TSO requires) needs the 3-4-thread tests — run"
+    echo "   those via litmus7 next. Until rcpc passes IRIW/WRC on THIS silicon, ship"
+    echo "   the sc (LDAR/STLR) or dmb mapping, which are MCA-safe by construction."
 else
     echo " LAYER A: FAILED — a mapping lost ordering (see FAIL lines). Do not ship"
     echo "          that mapping; investigate before trusting weak translation."
