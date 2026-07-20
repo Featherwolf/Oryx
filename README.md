@@ -39,8 +39,8 @@ tested components exist. What builds and passes tests today:
 
 | Component | What | State |
 |-----------|------|-------|
-| `experiments/phase0-tso-probe/litmus` | MP + SB memory-model detector + protocol | **built & validated** on host (correctly IDs x86 as TSO) |
-| `experiments/phase0-tso-probe/probe` | Oryon control-bit finder (kernel module) | written; builds against a target-device kernel |
+| `experiments/phase0-tso-probe/litmus` | MP + SB memory-model detector + protocol | **validated on host AND on a real S26 Ultra** — baseline confirmed WEAK ([RESULTS.md](RESULTS.md)) |
+| `experiments/phase0-tso-probe/probe` | Oryon control-bit finder (kernel module) | written; builds against a target-device kernel ([Step 2 runbook](experiments/phase0-tso-probe/probe/STEP2-RUNBOOK.md)) |
 | `src/kmod/oryx_memmodel` | Part A per-thread hardware-TSO driver | written; builds against a target-device kernel |
 | `src/liboryxmm` | userspace TSO client for emulators | **built & tested** (fail-closed) |
 | `src/liboryxcache` | Part B content-addressed translation/shader cache | **built & tested** (28 assertions) |
@@ -59,6 +59,11 @@ toggled per-thread from an Android kernel module (it is *documented as present* 
 it — but the toggle mechanism is not public). Phase 0 is a cheap, buildable memory-litmus
 experiment that answers this before any other engineering starts. Everything downstream
 branches on its result.
+
+**Step 1 is done:** on a real S26 Ultra the cores measure **WEAK** at baseline with a
+sensitive detector — the precondition confirmed on hardware ([RESULTS.md](RESULTS.md)).
+**Step 2** (the root-only control-bit hunt that could prove a hardware TSO mode exists) is the
+next gate — [runbook here](experiments/phase0-tso-probe/probe/STEP2-RUNBOOK.md).
 
 ## Repository layout
 
