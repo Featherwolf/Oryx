@@ -21,7 +21,7 @@
 
 set -eu
 
-ITERS="${ITERS:-50000000}"
+ITERS="${ITERS:-5000000}"   # ~1 min total on a phone; raise to 20000000+ if INCONCLUSIVE
 BIN="${BIN:-./oryx_litmus}"
 
 if [ ! -x "$BIN" ]; then

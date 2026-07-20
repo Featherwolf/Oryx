@@ -66,7 +66,7 @@ typedef struct {
 enum test_kind { TEST_MP, TEST_SB };
 
 static shared_t *S;
-static long g_iters  = 50000000L;
+static long g_iters  = 5000000L;   /* mobile-friendly default; raise for more sensitivity */
 static int  g_fenced = 0;
 static int  g_cpu_a  = 0;
 static int  g_cpu_b  = 1;

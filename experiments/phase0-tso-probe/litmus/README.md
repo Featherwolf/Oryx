@@ -65,7 +65,7 @@ from WEAK to TSO — that is the signature of Oryon's Rosetta-style memory mode.
 ## Tuning sensitivity
 
 If SB witnesses are low or zero on the device:
-- Increase `ITERS` (default 50M).
+- Increase `ITERS` (default 5M).
 - Prefer **cross-cluster** pairs (one Prime + one Performance core) — different clusters
   widen the store-propagation window.
 - Reduce lockstep: the per-trial gate keeps threads aligned; if it over-synchronizes, a
