@@ -29,6 +29,13 @@ static uint32_t enc_ldar(int rt,int rn)    { return 0xC8DFFC00u | ((uint32_t)rn<
 static uint32_t enc_ldapr(int rt,int rn)   { return 0xF8BFC000u | ((uint32_t)rn<<5) | (uint32_t)rt; } /* LDAPR Xt,[Xn] (RCpc, FEAT_LRCPC: EXACT TSO load — cheapest correct) */
 static uint32_t enc_stlr(int rt,int rn)    { return 0xC89FFC00u | ((uint32_t)rn<<5) | (uint32_t)rt; } /* STLR  Xt,[Xn] */
 static uint32_t enc_add_imm(int rd,int rn,uint32_t imm12){ return 0x91000000u | ((imm12&0xfffu)<<10) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* ADD Xd,Xn,#imm */
+static uint32_t enc_sub_imm(int rd,int rn,uint32_t imm12){ return 0xD1000000u | ((imm12&0xfffu)<<10) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* SUB Xd,Xn,#imm */
+static uint32_t enc_subs_imm(int rn,uint32_t imm12){ return 0xF100001Fu | ((imm12&0xfffu)<<10) | ((uint32_t)rn<<5); } /* SUBS XZR,Xn,#imm (CMP) */
+static uint32_t enc_adds_imm(int rn,uint32_t imm12){ return 0xB100001Fu | ((imm12&0xfffu)<<10) | ((uint32_t)rn<<5); } /* ADDS XZR,Xn,#imm (CMN) */
+static uint32_t enc_tst_rr(int rn,int rm){ return 0xEA00001Fu | ((uint32_t)rm<<16) | ((uint32_t)rn<<5); } /* ANDS XZR,Xn,Xm (TST) */
+static uint32_t enc_eor_rr(int rd,int rn,int rm){ return 0xCA000000u | ((uint32_t)rm<<16) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* EOR Xd,Xn,Xm */
+static uint32_t enc_and_rr(int rd,int rn,int rm){ return 0x8A000000u | ((uint32_t)rm<<16) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* AND Xd,Xn,Xm */
+static uint32_t enc_orr_rr2(int rd,int rn,int rm){ return 0xAA000000u | ((uint32_t)rm<<16) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* ORR Xd,Xn,Xm */
 static uint32_t enc_ldaddal(int rs,int rt,int rn){ return 0xF8E00000u | ((uint32_t)rs<<16) | ((uint32_t)rn<<5) | (uint32_t)rt; } /* LDADDAL Xs,Xt,[Xn] */
 static uint32_t enc_casal(int rs,int rt,int rn){ return 0xC8E0FC00u | ((uint32_t)rs<<16) | ((uint32_t)rn<<5) | (uint32_t)rt; } /* CASAL Xs,Xt,[Xn] */
 /* CSET Xd, cond = CSINC Xd, XZR, XZR, invert(cond) -> Xd = (cond) ? 1 : 0.
@@ -76,6 +83,19 @@ static int buf_emit32(struct buf *b, uint32_t insn)
 	b->p[b->len++] = (uint8_t)(insn >> 8);
 	b->p[b->len++] = (uint8_t)(insn >> 16);
 	b->p[b->len++] = (uint8_t)(insn >> 24);
+	return ORYX_OK;
+}
+
+/* Materialize a 64-bit constant into `reg` via MOVZ + MOVK lanes. */
+static int emit_movimm(struct buf *code, int reg, uint64_t v)
+{
+	if (buf_emit32(code, enc_movz(reg, (uint32_t)(v & 0xffff), 0)) != ORYX_OK)
+		return ORYX_ERR_NOMEM;
+	for (int hw = 1; hw < 4; hw++) {
+		uint32_t lane = (uint32_t)((v >> (16*hw)) & 0xffff);
+		if (lane && buf_emit32(code, enc_movk(reg, lane, hw)) != ORYX_OK)
+			return ORYX_ERR_NOMEM;
+	}
 	return ORYX_OK;
 }
 
@@ -160,16 +180,10 @@ int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 		case GOP_MOV_RR:
 			EMIT(enc_mov_rr(in->rd, in->rn));
 			break;
-		case GOP_MOV_RI: {
-			uint64_t v = (uint64_t)in->imm;
-			EMIT(enc_movz(in->rd, (uint32_t)(v & 0xffff), 0));
-			for (int hw = 1; hw < 4; hw++) {
-				uint32_t lane = (uint32_t)((v >> (16*hw)) & 0xffff);
-				if (lane)
-					EMIT(enc_movk(in->rd, lane, hw));
-			}
+		case GOP_MOV_RI:
+			if (emit_movimm(&code, in->rd, (uint64_t)in->imm) != ORYX_OK)
+				FAIL(ORYX_ERR_NOMEM);
 			break;
-		}
 		case GOP_ADD_RR:
 			EMIT(enc_add_rr(in->rd, in->rd, in->rn));
 			break;
@@ -245,6 +259,37 @@ int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 		case GOP_SETCC:                    /* rd = (cc) ? 1 : 0 -> CSET Xrd,cond */
 			EMIT(enc_cset(in->rd, arm_cond(in->cc)));
 			break;
+		case GOP_ADD_RI:                   /* rd = rd + imm */
+		case GOP_SUB_RI:                   /* rd = rd - imm */
+		case GOP_LEA: {                    /* rd = rn + imm */
+			int base = (in->op == GOP_LEA) ? in->rn : in->rd;
+			int64_t eff = (in->op == GOP_SUB_RI) ? -in->imm : in->imm;
+			if (eff >= 0 && eff <= 0xFFF) {
+				EMIT(enc_add_imm(in->rd, base, (uint32_t)eff));
+			} else if (eff < 0 && eff >= -0xFFF) {
+				EMIT(enc_sub_imm(in->rd, base, (uint32_t)(-eff)));
+			} else {
+				if (emit_movimm(&code, ORYX_SCRATCH, (uint64_t)eff) != ORYX_OK)
+					FAIL(ORYX_ERR_NOMEM);
+				EMIT(enc_add_rr(in->rd, base, ORYX_SCRATCH));
+			}
+			break;
+		}
+		case GOP_CMP_RI:                   /* flags = rd - imm */
+			if (in->imm >= 0 && in->imm <= 0xFFF) {
+				EMIT(enc_subs_imm(in->rd, (uint32_t)in->imm));
+			} else if (in->imm < 0 && in->imm >= -0xFFF) {
+				EMIT(enc_adds_imm(in->rd, (uint32_t)(-in->imm)));   /* CMN */
+			} else {
+				if (emit_movimm(&code, ORYX_SCRATCH, (uint64_t)in->imm) != ORYX_OK)
+					FAIL(ORYX_ERR_NOMEM);
+				EMIT(enc_subs_cmp(in->rd, ORYX_SCRATCH));
+			}
+			break;
+		case GOP_TEST_RR: EMIT(enc_tst_rr(in->rd, in->rn)); break;   /* flags = rd & rn */
+		case GOP_XOR_RR:  EMIT(enc_eor_rr(in->rd, in->rd, in->rn)); break;
+		case GOP_AND_RR:  EMIT(enc_and_rr(in->rd, in->rd, in->rn)); break;
+		case GOP_OR_RR:   EMIT(enc_orr_rr2(in->rd, in->rd, in->rn)); break;
 		case GOP_BR:
 			ADD_RELOC((uint32_t)code.len, ORYX_RELOC_BRANCH_GUEST_PC, in->target);
 			EMIT(enc_bcond(arm_cond(in->cc)));

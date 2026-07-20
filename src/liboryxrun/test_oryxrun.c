@@ -190,6 +190,50 @@ static void test_flags_and_fence(void)
 	CHECK(g.regs[GR_RAX] == 0x7, "RAX preserved across DMB");
 }
 
+static void test_new_alu(void)
+{
+	printf("test: decoder-facing integer ops (ADD_RI/SUB_RI/CMP_RI/TEST_RR/XOR/LEA)\n");
+	{
+		struct oryx_ginsn ops[7]; size_t k = 0;
+		ops[k++] = I(GOP_MOV_RI, GR_RAX, 0, 100);
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_ADD_RI, .rd = GR_RAX, .imm = 5 };   /* 105 */
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_SUB_RI, .rd = GR_RAX, .imm = 3 };   /* 102 */
+		ops[k++] = I(GOP_MOV_RI, GR_RCX, 0, 0xFF);
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_XOR_RR, .rd = GR_RCX, .rn = GR_RCX }; /* 0 */
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_LEA, .rd = GR_RDX, .rn = GR_RAX, .imm = -2 }; /* 100 */
+		ops[k++] = I(GOP_RET, 0, 0, 0);
+		struct oryx_guest g = {0};
+		CHECK(run_block(ops, k, ORYX_POLICY_DRF, ORYX_ORDER_SC, &g) == ORYX_OK, "alu run");
+		CHECK(g.regs[GR_RAX] == 102, "ADD_RI/SUB_RI: 100+5-3 = 102");
+		CHECK(g.regs[GR_RCX] == 0,   "XOR self -> 0");
+		CHECK(g.regs[GR_RDX] == 100, "LEA rn-2 = 100");
+	}
+	{	/* CMP_RI sets flags: 7 cmp 7 -> equal; SETcc EQ -> 1, LT -> 0. */
+		struct oryx_ginsn ops[5]; size_t k = 0;
+		ops[k++] = I(GOP_MOV_RI, GR_RAX, 0, 7);
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_CMP_RI, .rd = GR_RAX, .imm = 7 };
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_SETCC, .rd = GR_RCX, .cc = GCC_EQ };
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_SETCC, .rd = GR_RDX, .cc = GCC_LT };
+		ops[k++] = I(GOP_RET, 0, 0, 0);
+		struct oryx_guest g = {0};
+		CHECK(run_block(ops, k, ORYX_POLICY_DRF, ORYX_ORDER_SC, &g) == ORYX_OK, "cmp_ri run");
+		CHECK(g.regs[GR_RCX] == 1, "CMP_RI 7==7 -> EQ set");
+		CHECK(g.regs[GR_RDX] == 0, "CMP_RI 7==7 -> LT clear");
+	}
+	{	/* CMP_RI with negative immediate (CMN path): 5 cmp -1 -> 5 > -1 (GT). */
+		struct oryx_ginsn ops[5]; size_t k = 0;
+		ops[k++] = I(GOP_MOV_RI, GR_RAX, 0, 5);
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_CMP_RI, .rd = GR_RAX, .imm = -1 };
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_SETCC, .rd = GR_RCX, .cc = GCC_GT };
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_SETCC, .rd = GR_RDX, .cc = GCC_LT };
+		ops[k++] = I(GOP_RET, 0, 0, 0);
+		struct oryx_guest g = {0};
+		CHECK(run_block(ops, k, ORYX_POLICY_DRF, ORYX_ORDER_SC, &g) == ORYX_OK, "cmp_ri neg run");
+		CHECK(g.regs[GR_RCX] == 1, "CMP_RI 5 > -1 -> GT (CMN path)");
+		CHECK(g.regs[GR_RDX] == 0, "CMP_RI 5 > -1 -> LT clear");
+	}
+}
+
 /* ---- multi-block dispatcher tests --------------------------------------- */
 
 /* Guest program: a countdown loop that sums the counter.
@@ -340,6 +384,7 @@ int main(void)
 	test_memory_paths();
 	test_atomics();
 	test_flags_and_fence();
+	test_new_alu();
 	test_dispatcher();
 	printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;

@@ -6,8 +6,9 @@
 #
 # The kernel modules (kmod/) build separately against a target-device kernel.
 
-# liboryxtu depends on liboryxcache; liboryxmap and liboryxrun depend on both. Keep order.
-USERSPACE = liboryxmm liboryxcache liboryxtu liboryxmap liboryxprofile liboryxrun
+# liboryxtu depends on liboryxcache; liboryxmap/liboryxrun on both; liboryxdec on
+# liboryxtu + liboryxrun. Keep order.
+USERSPACE = liboryxmm liboryxcache liboryxtu liboryxmap liboryxprofile liboryxrun liboryxdec
 
 all:
 	@for d in $(USERSPACE); do echo "== build $$d =="; $(MAKE) -C $$d all || exit 1; done
@@ -17,10 +18,11 @@ check:
 	@echo ""
 	@echo "All Oryx userspace test suites passed."
 
-# Execute the translated blocks for real: static AArch64 build under qemu.
-# Skips cleanly if the cross toolchain / qemu are absent.
+# Execute for real under qemu: the translated blocks, then decode+run real
+# compiled x86-64 programs. Skips cleanly if the cross toolchain / qemu are absent.
 check-qemu:
 	$(MAKE) -C liboryxrun check-qemu
+	$(MAKE) -C liboryxdec check-qemu
 
 clean:
 	@for d in $(USERSPACE); do $(MAKE) -C $$d clean; done

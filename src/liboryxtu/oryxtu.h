@@ -53,7 +53,16 @@ enum oryx_gop {
 	GOP_ATOMIC_ADD,  /* LOCK ADD [rn], rd   -> LDADDAL (acq+rel), disp 0    */
 	GOP_ATOMIC_CAS,  /* LOCK CMPXCHG [rn]    -> CASAL (RAX=cmp, rd=desired)  */
 	GOP_FENCE,       /* MFENCE/LFENCE/SFENCE -> DMB ISH/ISHLD/ISHST (via cc) */
-	GOP_SETCC        /* rd = (cc) ? 1 : 0  (x86 SETcc) -> CSET Xrd, cond     */
+	GOP_SETCC,       /* rd = (cc) ? 1 : 0  (x86 SETcc) -> CSET Xrd, cond     */
+	/* --- integer forms the x86-64 decoder emits (imm sign-extended to 64) --- */
+	GOP_ADD_RI,      /* rd = rd + imm                    -> ADD/SUB #imm      */
+	GOP_SUB_RI,      /* rd = rd - imm                    -> SUB/ADD #imm      */
+	GOP_CMP_RI,      /* flags = rd - imm                 -> SUBS/ADDS XZR     */
+	GOP_TEST_RR,     /* flags = rd & rn                  -> ANDS XZR (TST)    */
+	GOP_XOR_RR,      /* rd = rd ^ rn                     -> EOR               */
+	GOP_AND_RR,      /* rd = rd & rn                     -> AND               */
+	GOP_OR_RR,       /* rd = rd | rn                     -> ORR               */
+	GOP_LEA          /* rd = rn + imm  (x86 LEA base+disp) -> ADD/SUB #imm    */
 };
 
 /*
