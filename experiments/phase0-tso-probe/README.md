@@ -23,6 +23,8 @@ first, cheaply, before building anything else. Everything downstream branches on
 ```
 experiments/phase0-tso-probe/
   litmus/      A memory-model detector (userspace, no root).
+               oryx_litmus.c  — MP + SB litmus tests (see litmus/README.md)
+               run_phase0.sh  — automated protocol + per-pair verdict
                Empirically measures whether the effective memory model
                is weak (reordering observed) or TSO (reordering forbidden).
   probe/       A kernel-module method to (a) find Oryon's memory-mode
@@ -31,16 +33,19 @@ experiments/phase0-tso-probe/
 
 ### Step 1 — Validate the detector (no root, safe on any device)
 
-Build and run `litmus/` on the S26 Ultra in three modes:
+Build and run `litmus/` on the S26 Ultra. `run_phase0.sh` executes the full matrix; the
+individual signals it combines are:
 
-| Mode | What it does | Expected on stock ARM | Proves |
-|------|--------------|-----------------------|--------|
-| `relaxed` | Message-Passing test, no barriers | **nonzero** reordering | the detector actually observes weak-model reordering on this silicon |
-| `fenced` | Same, but with a `DMB ISH` barrier | **zero** reordering | the detector can *discriminate* ordered vs unordered |
+| Test / mode | What it does | Expected on stock ARM | Proves |
+|-------------|--------------|-----------------------|--------|
+| `sb relaxed` | Store-Buffer test (allowed under TSO *and* weak) | **nonzero** | the detector is sensitive on this silicon |
+| `mp relaxed` | Message-Passing test, no barriers | **nonzero** (weak) | the pair is weakly ordered at baseline |
+| `mp fenced` | Same, but with a `DMB ISH` barrier | **zero** | the detector can *discriminate* ordered vs unordered |
 
-If `relaxed` already shows zero, the test lacks sensitivity on Oryon — crank iterations,
-add contention/noise threads, and force cross-cluster affinity until reordering appears.
-**A meaningful TSO result requires first establishing that the detector sees reordering.**
+The Store-Buffer test is the sensitivity control: if it shows zero, the harness isn't
+exposing reordering (raise `ITERS`, use cross-cluster core pairs) and any MP result is
+meaningless. **A meaningful TSO result requires SB firing first.** See
+[`litmus/README.md`](litmus/README.md) for the full decision rule.
 
 ### Step 2 — Find and flip the bit (needs root / unlocked bootloader)
 
