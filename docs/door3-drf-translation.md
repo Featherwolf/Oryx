@@ -86,12 +86,13 @@ overrides (Part C).
 
 The three correct choices for a SHARED access, cheapest first:
 
-- **Exact-TSO, cheapest — acquire-RCpc/release** `LDAPR`(RCpc)/`STLR`: **exactly** x86-TSO per the
-  formal ARMv8 model, zero extra instructions. Needs `FEAT_LRCPC` (ARMv8.3; Oryon has it). The
-  intended primary mapping — but **gated on measurement**: its W→R exactness is checked on-device by
-  Layer A (2-thread `SB`), while its multi-copy-atomicity (WRC/IRIW **forbidden**) must be confirmed
-  by the 3–4-thread litmus before it ships. Until then the default stays `SC`/DMB (see
-  `docs/box64-fex-integration.md` §4).
+- **Exact-TSO, cheapest — acquire-RCpc/release** `LDAPR`(RCpc)/`STLR`: **exactly** x86-TSO, zero
+  extra instructions. Needs `FEAT_LRCPC` (ARMv8.3; Oryon has it). The intended primary mapping on
+  target hardware. Its one difference from `SC` — allowing the store→load (`SB`) outcome TSO permits —
+  is exactly what Layer A's 2-thread `SB` test measures on-device; `WRC`/`IRIW` are forbidden under
+  `LDAPR` just as under `LDAR` (both via ARMv8 other-MCA), so there is no separate MCA gate. The
+  reference translator defaults to `SC` for portability/conservatism, not because `rcpc` is unproven
+  (see `docs/box64-fex-integration.md` §4).
 - **Conservative — acquire-RCsc/release** `LDAR`(RCsc)/`STLR`: *stronger* than TSO (it also forbids
   the W→R reorder, i.e. it's sequentially consistent for those accesses) — correct, simpler, but
   over-costs by keeping an ordering TSO does not require. **This is the reference `liboryxtu`

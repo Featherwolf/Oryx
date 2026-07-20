@@ -158,13 +158,15 @@ then prints `LAYER A: ordering restored by all three mappings` plus the W→R ex
 even `plain` SB stays 0 everywhere, raise the window: `ITERS=100000000 sh run_layerA.sh`, or force
 a pair with `PAIR="0:7"`.
 
-> **Important scope — `rcpc` is not cleared to ship by this test alone.** Layer A is 2-thread
-> (store→store, load→load, store→load). It proves the **W→R** half of TSO-exactness but **cannot**
-> see multi-copy atomicity. Whether `LDAPR`/`STLR` keeps **WRC and IRIW forbidden** (which x86-TSO
-> requires, and which the formal ARM model says it does) must be measured with the **3–4-thread**
-> tests — that's the `litmus7` step in "what comes next". Until `rcpc` passes WRC/IRIW on *your*
-> Oryon, the safe shipping mapping is `sc` (`LDAR`/`STLR`) or `dmb`, both multi-copy-atomic by
-> construction. The runner prints this caveat at the end of every run.
+> **Scope — and why this run already clears `rcpc`.** Layer A is 2-thread (store→store, load→load,
+> store→load). The `SB` result is the *complete* `rcpc`-vs-`sc` test: the only ordering RCpc relaxes
+> versus RCsc is the store→load (`SB`) edge. `WRC` and `IRIW` have no such edge, so `LDAPR` forbids
+> them *identically* to `LDAR` (both via ARMv8 hardware multi-copy-atomicity) — there is **no
+> separate MCA gate `rcpc` must pass that `sc` doesn't.** So `W->R EXACTNESS CONFIRMED` here clears
+> `rcpc` as exact-TSO. `make mca` (the 3-thread WRC test) is a *hardware-MCA sanity check* — it
+> confirms this silicon behaves multi-copy-atomically under every ordered mapping — not an
+> `rcpc`-specific gate. The reference translator defaults to `sc` for portability (RCsc works on
+> ARMv8.0; `LDAPR` needs 8.3), not because `rcpc` is unproven.
 
 ---
 
