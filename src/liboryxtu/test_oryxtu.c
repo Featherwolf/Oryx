@@ -200,7 +200,7 @@ static void test_memory_model(void)
 	b[n++] = (struct oryx_ginsn){ .op = GOP_RET };
 
 	struct oryx_tu tu; struct oryx_mm_stats st;
-	CHECK(oryx_translate_ex(b, n, 0x2000, 24, 3, ORYX_POLICY_DRF, &tu, &st) == ORYX_OK,
+	CHECK(oryx_translate_ex(b, n, 0x2000, 24, 3, ORYX_POLICY_DRF, ORYX_ORDER_SC, &tu, &st) == ORYX_OK,
 	      "translate_ex ok");
 	CHECK(word_at(&tu, 0)  == 0xC8DFFCE0u, "LDAR X0,[X7]  (shared load -> acquire)");
 	CHECK(word_at(&tu, 4)  == 0xC89FFCC0u, "STLR X0,[X6]  (shared store -> release)");
@@ -227,8 +227,8 @@ static void test_barrier_reduction(void)
 	b[n++] = (struct oryx_ginsn){ .op = GOP_RET };
 
 	struct oryx_tu drf, con; struct oryx_mm_stats sd, sc;
-	CHECK(oryx_translate_ex(b, n, 0x3000, 28, 1, ORYX_POLICY_DRF, &drf, &sd) == ORYX_OK, "drf translate");
-	CHECK(oryx_translate_ex(b, n, 0x3000, 28, 1, ORYX_POLICY_CONSERVATIVE, &con, &sc) == ORYX_OK, "conservative translate");
+	CHECK(oryx_translate_ex(b, n, 0x3000, 28, 1, ORYX_POLICY_DRF, ORYX_ORDER_SC, &drf, &sd) == ORYX_OK, "drf translate");
+	CHECK(oryx_translate_ex(b, n, 0x3000, 28, 1, ORYX_POLICY_CONSERVATIVE, ORYX_ORDER_SC, &con, &sc) == ORYX_OK, "conservative translate");
 
 	uint32_t drf_ordered = sd.ordered_loads + sd.ordered_stores;
 	uint32_t con_ordered = sc.ordered_loads + sc.ordered_stores;
@@ -244,6 +244,33 @@ static void test_barrier_reduction(void)
 	oryx_tu_free(&drf); oryx_tu_free(&con);
 }
 
+static void test_exact_tso_mapping(void)
+{
+	printf("test: exact-TSO DMB-fence mapping (the corrected minimal mapping)\n");
+	struct oryx_ginsn b[4]; size_t n = 0;
+	b[n++] = (struct oryx_ginsn){ .op = GOP_LOAD,  .rd = GR_RAX, .rn = GR_RDI, .imm = 0, .mclass = ORYX_MCLASS_SHARED };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_STORE, .rd = GR_RAX, .rn = GR_RSI, .imm = 8, .mclass = ORYX_MCLASS_SHARED };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_RET };
+
+	struct oryx_tu tu; struct oryx_mm_stats st;
+	CHECK(oryx_translate_ex(b, n, 0x5000, 16, 2, ORYX_POLICY_DRF, ORYX_ORDER_TSO, &tu, &st) == ORYX_OK,
+	      "exact-TSO translate ok");
+	/* SHARED load  -> LDR X0,[X7] ; DMB ISHLD   (trailing read fence) */
+	CHECK(word_at(&tu, 0)  == 0xF94000E0u, "LDR X0,[X7]");
+	CHECK(word_at(&tu, 4)  == 0xD50339BFu, "DMB ISHLD (after load)");
+	/* SHARED store -> DMB ISHST ; STR X0,[X6,#8] (leading write fence) */
+	CHECK(word_at(&tu, 8)  == 0xD5033ABFu, "DMB ISHST (before store)");
+	CHECK(word_at(&tu, 12) == 0xF90004C0u, "STR X0,[X6,#8]");
+	CHECK(word_at(&tu, 16) == 0xD65F03C0u, "RET");
+	CHECK(st.ordered_loads == 1 && st.ordered_stores == 1, "counted as ordered");
+
+	/* The same SHARED access under SC strength lowers to LDAR — proving the modes differ. */
+	struct oryx_tu sc;
+	oryx_translate_ex(b, n, 0x5000, 16, 2, ORYX_POLICY_DRF, ORYX_ORDER_SC, &sc, NULL);
+	CHECK(word_at(&sc, 0) == 0xC8DFFCE0u, "SC strength uses LDAR X0,[X7] instead (contrast)");
+	oryx_tu_free(&tu); oryx_tu_free(&sc);
+}
+
 int main(void)
 {
 	test_encodings();
@@ -253,6 +280,7 @@ int main(void)
 	test_wellformed();
 	test_memory_model();
 	test_barrier_reduction();
+	test_exact_tso_mapping();
 	printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;
 }

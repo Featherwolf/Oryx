@@ -83,6 +83,17 @@ struct oryx_ginsn {
  */
 enum oryx_mm_policy { ORYX_POLICY_DRF = 0, ORYX_POLICY_CONSERVATIVE = 1 };
 
+/*
+ * How an *ordered* (SHARED) access is lowered — the two correct choices
+ * (docs/box64-fex-integration.md §4; bare LDAPR is unsound):
+ *   SC  — LDAR/STLR (RCsc): stronger than TSO (also forbids the W->R reorder TSO
+ *         allows). Correct, simplest, the safe conservative/differential baseline.
+ *   TSO — the minimal exact-TSO DMB-fence scheme: load = LDR;DMB ISHLD,
+ *         store = DMB ISHST;STR. Preserves exactly the W->R relaxation, and is
+ *         multi-copy-atomic (unlike bare LDAPR).
+ */
+enum oryx_order_strength { ORYX_ORDER_SC = 0, ORYX_ORDER_TSO = 1 };
+
 /* Counts of how each memory op was lowered — the barrier-reduction metric. */
 struct oryx_mm_stats {
 	uint32_t plain_loads,  plain_stores;    /* weak LDR/STR (free)          */
@@ -116,8 +127,8 @@ int oryx_translate(const struct oryx_ginsn *ops, size_t n,
  */
 int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 		      uint64_t guest_pc, uint32_t guest_len, uint32_t profile_id,
-		      enum oryx_mm_policy policy, struct oryx_tu *out,
-		      struct oryx_mm_stats *stats);
+		      enum oryx_mm_policy policy, enum oryx_order_strength strength,
+		      struct oryx_tu *out, struct oryx_mm_stats *stats);
 
 #ifdef __cplusplus
 }

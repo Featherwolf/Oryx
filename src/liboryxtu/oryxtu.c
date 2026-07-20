@@ -99,8 +99,8 @@ static void hash_block(const struct oryx_ginsn *ops, size_t n,
 /* ---- translate ----------------------------------------------------------- */
 int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 		      uint64_t guest_pc, uint32_t guest_len, uint32_t profile_id,
-		      enum oryx_mm_policy policy, struct oryx_tu *out,
-		      struct oryx_mm_stats *stats)
+		      enum oryx_mm_policy policy, enum oryx_order_strength strength,
+		      struct oryx_tu *out, struct oryx_mm_stats *stats)
 {
 	if (!ops || !out)
 		return ORYX_ERR_INVAL;
@@ -177,9 +177,24 @@ int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 				uint32_t imm12 = (uint32_t)(in->imm >> 3);
 				if (in->op == GOP_LOAD) { EMIT(enc_ldr(in->rd, in->rn, imm12)); st.plain_loads++; }
 				else                    { EMIT(enc_str(in->rd, in->rn, imm12)); st.plain_stores++; }
+			} else if (strength == ORYX_ORDER_TSO) {
+				/* minimal exact-TSO DMB-fence scheme: keeps the scaled offset
+				 * (like a plain LDR/STR) and brackets it with a one-sided DMB. */
+				if (in->imm < 0 || (in->imm & 7) != 0 || (in->imm >> 3) > 0xFFF)
+					FAIL(ORYX_ERR_INVAL);
+				uint32_t imm12 = (uint32_t)(in->imm >> 3);
+				if (in->op == GOP_LOAD) {
+					EMIT(enc_ldr(in->rd, in->rn, imm12));   /* LDR ... */
+					EMIT(enc_dmb(ORYX_FENCE_LD));           /* ; DMB ISHLD (R->RW) */
+					st.ordered_loads++;
+				} else {
+					EMIT(enc_dmb(ORYX_FENCE_ST));           /* DMB ISHST (RW->W) ; */
+					EMIT(enc_str(in->rd, in->rn, imm12));   /* STR ... */
+					st.ordered_stores++;
+				}
 			} else {
-				/* ordered acquire/release: address must be in a register, so
-				 * a nonzero displacement costs an extra ADD (imm 0..4095). */
+				/* SC acquire/release (LDAR/STLR): address must be in a register,
+				 * so a nonzero displacement costs an extra ADD (imm 0..4095). */
 				int base = in->rn;
 				if (in->imm < 0 || in->imm > 0xFFF)
 					FAIL(ORYX_ERR_INVAL);
@@ -256,11 +271,11 @@ fail:
 	return rc;
 }
 
-/* Convenience: the default translator is DRF policy with no stats reporting. */
+/* Convenience: DRF policy, SC (LDAR/STLR) ordering strength, no stats. */
 int oryx_translate(const struct oryx_ginsn *ops, size_t n,
 		   uint64_t guest_pc, uint32_t guest_len, uint32_t profile_id,
 		   struct oryx_tu *out)
 {
 	return oryx_translate_ex(ops, n, guest_pc, guest_len, profile_id,
-				 ORYX_POLICY_DRF, out, NULL);
+				 ORYX_POLICY_DRF, ORYX_ORDER_SC, out, NULL);
 }

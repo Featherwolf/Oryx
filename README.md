@@ -44,14 +44,16 @@ tested components exist. What builds and passes tests today:
 | `src/kmod/oryx_memmodel` | Part A per-thread hardware-TSO driver | written; builds against a target-device kernel |
 | `src/liboryxmm` | userspace TSO client for emulators | **built & tested** (fail-closed) |
 | `src/liboryxcache` | Part B content-addressed translation/shader cache | **built & tested** (28 assertions) |
-| `src/liboryxtu` | Deterministic x86-64→AArch64 translator + **Door 3 DRF-aware** memory-model lowering | **built & tested** (45 assertions) |
+| `src/liboryxtu` | Deterministic x86-64→AArch64 translator + **Door 3 DRF-aware** lowering (SC + exact-TSO mappings) | **built & tested** (53 assertions) |
 | `src/liboryxprofile` | Part C auto-tuning profile engine | **built & tested** (27 assertions) |
 
 Build and test everything from the repo root: `make check`. Full testing guide (host, CI, and
 the on-device Phase 0 experiment): [`TESTING.md`](TESTING.md). Path from here to running a real
 game with an Oryx win (honest step count): [`docs/roadmap-to-device.md`](docs/roadmap-to-device.md).
 The flagship CPU-win engineering design (DRF classifier into Box64/FEX, corrected TSO mapping,
-no-root validation): [`docs/box64-fex-integration.md`](docs/box64-fex-integration.md).
+no-root validation): [`docs/box64-fex-integration.md`](docs/box64-fex-integration.md). No-root
+correctness-validation plan (litmus7 battery + differential testing):
+[`docs/validation-harness.md`](docs/validation-harness.md).
 Launch wrapper that applies a tuned profile to a real game: [`tools/oryx-run.sh`](tools/oryx-run.sh).
 
 The project is gated on a single decisive experiment:
