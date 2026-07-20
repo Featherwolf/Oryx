@@ -6,8 +6,8 @@
 #
 # The kernel modules (kmod/) build separately against a target-device kernel.
 
-# liboryxtu depends on liboryxcache; keep it after in build order.
-USERSPACE = liboryxmm liboryxcache liboryxtu liboryxprofile
+# liboryxtu depends on liboryxcache; liboryxmap depends on both. Keep order.
+USERSPACE = liboryxmm liboryxcache liboryxtu liboryxmap liboryxprofile
 
 all:
 	@for d in $(USERSPACE); do echo "== build $$d =="; $(MAKE) -C $$d all || exit 1; done

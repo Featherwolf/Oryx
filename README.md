@@ -45,6 +45,7 @@ tested components exist. What builds and passes tests today:
 | `src/liboryxmm` | userspace TSO client for emulators | **built & tested** (fail-closed) |
 | `src/liboryxcache` | Part B content-addressed translation/shader cache | **built & tested** (28 assertions) |
 | `src/liboryxtu` | Deterministic x86-64→AArch64 translator + **Door 3 DRF-aware** lowering (SC + exact-TSO mappings) | **built & tested** (53 assertions) |
+| `src/liboryxmap` | Offline memory-class map + **sound decision contract** + reference classifier (Door 3 no-root lever) | **built & tested** (37 assertions) |
 | `src/liboryxprofile` | Part C auto-tuning profile engine | **built & tested** (27 assertions) |
 
 Build and test everything from the repo root: `make check`. Full testing guide (host, CI, and
