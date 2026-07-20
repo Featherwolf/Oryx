@@ -27,12 +27,16 @@ check-qemu:
 	$(MAKE) -C src check-qemu
 
 # Prove the whole tree builds for aarch64 (the Snapdragon 8 Elite Gen 5 target).
+# Cleans before AND after so it leaves a host-buildable tree (cross-built objects
+# would otherwise make a subsequent host `make check` run aarch64 binaries).
 aarch64:
 	$(MAKE) -C experiments/phase0-tso-probe/litmus clean
 	$(MAKE) -C experiments/phase0-tso-probe/litmus CC=aarch64-linux-gnu-gcc
 	$(MAKE) -C src clean
 	$(MAKE) -C src CC=aarch64-linux-gnu-gcc
 	@echo "aarch64 cross-build OK"
+	$(MAKE) -C experiments/phase0-tso-probe/litmus clean
+	$(MAKE) -C src clean
 
 clean:
 	$(MAKE) -C src clean

@@ -31,6 +31,10 @@ static uint32_t enc_stlr(int rt,int rn)    { return 0xC89FFC00u | ((uint32_t)rn<
 static uint32_t enc_add_imm(int rd,int rn,uint32_t imm12){ return 0x91000000u | ((imm12&0xfffu)<<10) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* ADD Xd,Xn,#imm */
 static uint32_t enc_ldaddal(int rs,int rt,int rn){ return 0xF8E00000u | ((uint32_t)rs<<16) | ((uint32_t)rn<<5) | (uint32_t)rt; } /* LDADDAL Xs,Xt,[Xn] */
 static uint32_t enc_casal(int rs,int rt,int rn){ return 0xC8E0FC00u | ((uint32_t)rs<<16) | ((uint32_t)rn<<5) | (uint32_t)rt; } /* CASAL Xs,Xt,[Xn] */
+/* CSET Xd, cond = CSINC Xd, XZR, XZR, invert(cond) -> Xd = (cond) ? 1 : 0.
+ * The encoded condition field is the inversion of the tested condition (low
+ * bit flipped), e.g. CSET X0,EQ = 0x9A9F17E0 (cond field = NE). */
+static uint32_t enc_cset(int rd, int cond){ return 0x9A9F07E0u | (((uint32_t)(cond ^ 1) & 0xf) << 12) | (uint32_t)rd; }
 static uint32_t enc_dmb(int fence)         { /* DMB ISH / ISHLD / ISHST */
 	switch (fence) {
 	case ORYX_FENCE_LD: return 0xD50339BFu; /* DMB ISHLD */
@@ -235,6 +239,9 @@ int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 		case GOP_FENCE:                    /* MFENCE/LFENCE/SFENCE -> DMB */
 			EMIT(enc_dmb(in->cc));
 			st.fences++;
+			break;
+		case GOP_SETCC:                    /* rd = (cc) ? 1 : 0 -> CSET Xrd,cond */
+			EMIT(enc_cset(in->rd, arm_cond(in->cc)));
 			break;
 		case GOP_BR:
 			ADD_RELOC((uint32_t)code.len, ORYX_RELOC_BRANCH_GUEST_PC, in->target);

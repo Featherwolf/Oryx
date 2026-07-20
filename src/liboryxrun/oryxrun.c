@@ -8,7 +8,11 @@
 
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <sys/mman.h>
+
+/* AArch64 "RET x30" — every executable straight-line block must end in this. */
+#define AARCH64_RET 0xD65F03C0u
 
 int oryx_run_supported(void)
 {
@@ -30,6 +34,17 @@ int oryx_exec_map(const struct oryx_tu *tu, struct oryx_exec *out)
 	/* Code is a stream of 32-bit AArch64 instructions. */
 	if ((tu->code_len & 3u) != 0)
 		return ORYX_ERR_FORMAT;
+	/* A straight-line block is entered via BLR and must return via RET, else
+	 * execution falls off the end of the mapping. The translator guarantees a
+	 * terminator; verify it defensively so a malformed/hand-built TU can never
+	 * make the runtime run into arbitrary bytes. */
+	{
+		const uint8_t *last = tu->code + tu->code_len - 4;
+		uint32_t insn = (uint32_t)last[0] | ((uint32_t)last[1] << 8) |
+				((uint32_t)last[2] << 16) | ((uint32_t)last[3] << 24);
+		if (insn != AARCH64_RET)
+			return ORYX_ERR_INVAL;
+	}
 
 	long pg = sysconf(_SC_PAGESIZE);
 	size_t page = (pg > 0) ? (size_t)pg : 4096u;
@@ -42,8 +57,11 @@ int oryx_exec_map(const struct oryx_tu *tu, struct oryx_exec *out)
 		return ORYX_ERR_NOMEM;
 	memcpy(m, tu->code, tu->code_len);
 	if (mprotect(m, map_len, PROT_READ | PROT_EXEC) != 0) {
+		int e = errno;                 /* capture before munmap clobbers it */
 		munmap(m, map_len);
-		return ORYX_ERR_NOMEM;
+		/* On W^X-hardened targets (SELinux execmem, PR_SET_MDWE, PaX) this
+		 * fails with EACCES/EPERM — a policy problem, not out-of-memory. */
+		return (e == EACCES || e == EPERM) ? ORYX_ERR_PERM : ORYX_ERR_NOMEM;
 	}
 	__builtin___clear_cache((char *)m, (char *)m + tu->code_len);
 

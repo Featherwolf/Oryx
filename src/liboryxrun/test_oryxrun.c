@@ -115,57 +115,79 @@ static void test_memory_paths(void)
 
 static void test_atomics(void)
 {
-	printf("test: atomics execute (LDADDAL, CASAL)\n");
-	/* LOCK ADD [RDI] += RAX  (LDADDAL). */
+	printf("test: atomics execute (LDADDAL, CASAL) — full 64-bit operands\n");
+	/* LOCK ADD [RDI] += RAX. 64-bit operands so a 32-bit-encoding regression
+	 * (which would leave the high word untouched) produces a wrong result. */
 	{
-		uint64_t mem[1] = { 100 };
+		uint64_t mem[1] = { 0x1122334455667788ull };
 		struct oryx_ginsn ops[] = { I(GOP_ATOMIC_ADD, GR_RAX, GR_RDI, 0), I(GOP_RET,0,0,0) };
 		struct oryx_guest g = {0};
 		g.regs[GR_RDI] = (uint64_t)(uintptr_t)mem;
-		g.regs[GR_RAX] = 5;
+		g.regs[GR_RAX] = 0x0000000500000005ull;     /* adds into BOTH words */
 		CHECK(run_block(ops, 2, ORYX_POLICY_DRF, ORYX_ORDER_SC, &g) == ORYX_OK, "atomic add run");
-		CHECK(mem[0] == 105, "LDADDAL: [mem] == 105");
+		CHECK(mem[0] == 0x112233495566778Dull, "LDADDAL: full 64-bit add (high word carried too)");
 	}
-	/* LOCK CMPXCHG [RDI]: expect RAX==42 -> store RCX(99); RAX gets old value. */
+	/* LOCK CMPXCHG [RDI], match: comparand==[mem] over all 64 bits -> swap in RCX;
+	 * RAX gets the full old value. A 32-bit CAS would mis-handle the high word. */
 	{
-		uint64_t mem[1] = { 42 };
+		uint64_t mem[1] = { 0xDEADBEEFCAFE0099ull };
 		struct oryx_ginsn ops[] = { I(GOP_ATOMIC_CAS, GR_RCX, GR_RDI, 0), I(GOP_RET,0,0,0) };
 		struct oryx_guest g = {0};
 		g.regs[GR_RDI] = (uint64_t)(uintptr_t)mem;
-		g.regs[GR_RAX] = 42;   /* comparand */
-		g.regs[GR_RCX] = 99;   /* desired   */
-		CHECK(run_block(ops, 2, ORYX_POLICY_DRF, ORYX_ORDER_SC, &g) == ORYX_OK, "cas run");
-		CHECK(mem[0] == 99, "CASAL swapped: [mem] == 99");
-		CHECK(g.regs[GR_RAX] == 42, "CASAL: RAX holds old value 42");
+		g.regs[GR_RAX] = 0xDEADBEEFCAFE0099ull;      /* comparand (full match) */
+		g.regs[GR_RCX] = 0x1234567800000042ull;      /* desired */
+		CHECK(run_block(ops, 2, ORYX_POLICY_DRF, ORYX_ORDER_SC, &g) == ORYX_OK, "cas-match run");
+		CHECK(mem[0] == 0x1234567800000042ull, "CASAL match: [mem] = full 64-bit desired");
+		CHECK(g.regs[GR_RAX] == 0xDEADBEEFCAFE0099ull, "CASAL match: RAX = full 64-bit old value");
 	}
-	/* CAS that should FAIL (comparand mismatches). */
+	/* CAS mismatch where the LOW 32 bits are EQUAL but the high words differ: a
+	 * correct 64-bit CASAL must NOT swap; a 32-bit regression wrongly would. */
 	{
-		uint64_t mem[1] = { 7 };
+		uint64_t mem[1] = { 0xDEADBEEF00000042ull };
 		struct oryx_ginsn ops[] = { I(GOP_ATOMIC_CAS, GR_RCX, GR_RDI, 0), I(GOP_RET,0,0,0) };
 		struct oryx_guest g = {0};
 		g.regs[GR_RDI] = (uint64_t)(uintptr_t)mem;
-		g.regs[GR_RAX] = 42;   /* comparand != 7 -> no swap */
-		g.regs[GR_RCX] = 99;
-		CHECK(run_block(ops, 2, ORYX_POLICY_DRF, ORYX_ORDER_SC, &g) == ORYX_OK, "cas-fail run");
-		CHECK(mem[0] == 7, "CASAL no-swap: [mem] unchanged");
-		CHECK(g.regs[GR_RAX] == 7, "CASAL: RAX holds current value 7");
+		g.regs[GR_RAX] = 0x1111111100000042ull;      /* low32 matches, high32 differs */
+		g.regs[GR_RCX] = 0x9999999999999999ull;
+		CHECK(run_block(ops, 2, ORYX_POLICY_DRF, ORYX_ORDER_SC, &g) == ORYX_OK, "cas-mismatch run");
+		CHECK(mem[0] == 0xDEADBEEF00000042ull, "CASAL mismatch (high word): NO swap");
+		CHECK(g.regs[GR_RAX] == 0xDEADBEEF00000042ull, "CASAL mismatch: RAX = full 64-bit current value");
 	}
 }
 
-static void test_fence_and_cmp_smoke(void)
+/* SETcc materializes a flag into a register — the only way to OBSERVE the flags
+ * CMP computes in a straight-line (branch-free) block. This makes CMP's flag
+ * semantics behaviourally tested, not just byte-tested. */
+static void setcc_case(int64_t a, int64_t b, int expect_eq, int expect_lt)
 {
-	printf("test: fence + cmp execute without fault\n");
-	struct oryx_ginsn ops[] = {
-		I(GOP_MOV_RI, GR_RAX, 0, 3),
-		I(GOP_MOV_RI, GR_RCX, 0, 3),
-		I(GOP_CMP_RR, GR_RAX, GR_RCX, 0),           /* SUBS XZR,RAX,RCX (sets flags) */
-		I(GOP_FENCE,  0, 0, 0),                     /* DMB ISH */
-		I(GOP_RET,    0, 0, 0),
-	};
-	ops[3].cc = ORYX_FENCE_FULL;
+	struct oryx_ginsn ops[6];
+	ops[0] = I(GOP_MOV_RI, GR_RAX, 0, a);
+	ops[1] = I(GOP_MOV_RI, GR_RCX, 0, b);
+	ops[2] = I(GOP_CMP_RR, GR_RAX, GR_RCX, 0);          /* flags = a - b */
+	ops[3] = (struct oryx_ginsn){ .op = GOP_SETCC, .rd = GR_RDX, .cc = GCC_EQ };
+	ops[4] = (struct oryx_ginsn){ .op = GOP_SETCC, .rd = GR_RSI, .cc = GCC_LT };
+	ops[5] = I(GOP_RET, 0, 0, 0);
 	struct oryx_guest g = {0};
-	CHECK(run_block(ops, 5, ORYX_POLICY_DRF, ORYX_ORDER_SC, &g) == ORYX_OK, "cmp+fence run");
-	CHECK(g.regs[GR_RAX] == 3, "RAX preserved across cmp/fence");
+	CHECK(run_block(ops, 6, ORYX_POLICY_DRF, ORYX_ORDER_SC, &g) == ORYX_OK, "cmp+setcc run");
+	CHECK((int)g.regs[GR_RDX] == expect_eq, "SETcc EQ matches CMP flags");
+	CHECK((int)g.regs[GR_RSI] == expect_lt, "SETcc LT matches CMP flags");
+}
+
+static void test_flags_and_fence(void)
+{
+	printf("test: CMP flags observed via SETcc + fence executes\n");
+	setcc_case(3, 3, 1, 0);    /* 3 - 3 == 0 -> EQ true,  LT false */
+	setcc_case(3, 5, 0, 1);    /* 3 - 5  < 0 -> EQ false, LT true  */
+	setcc_case(9, 4, 0, 0);    /* 9 - 4  > 0 -> EQ false, LT false */
+
+	/* Fence executes without fault and preserves surrounding register state. */
+	struct oryx_ginsn f[3];
+	f[0] = I(GOP_MOV_RI, GR_RAX, 0, 0x7);
+	f[1] = (struct oryx_ginsn){ .op = GOP_FENCE, .cc = ORYX_FENCE_FULL };  /* DMB ISH */
+	f[2] = I(GOP_RET, 0, 0, 0);
+	struct oryx_guest g = {0};
+	CHECK(run_block(f, 3, ORYX_POLICY_DRF, ORYX_ORDER_SC, &g) == ORYX_OK, "fence run");
+	CHECK(g.regs[GR_RAX] == 0x7, "RAX preserved across DMB");
 }
 
 int main(void)
@@ -174,13 +196,16 @@ int main(void)
 		printf("oryxrun: execution tests SKIPPED (host is not AArch64).\n");
 		printf("         build with aarch64-linux-gnu-gcc and run under qemu-aarch64,\n");
 		printf("         or run on the device, to execute translated blocks.\n");
-		/* Still exercise map's arch-independent guards so the host build isn't a no-op. */
+		/* Still exercise the arch-independent paths so the host build isn't a no-op:
+		 * map (which copies+protects), the RET-terminator guard, and that run is
+		 * properly gated to UNSUPPORTED off AArch64. */
 		struct oryx_tu tu; struct oryx_ginsn ret = I(GOP_RET,0,0,0);
+		struct oryx_guest gd = {0};
 		if (oryx_translate_ex(&ret, 1, 0x1000, 4, 0, ORYX_POLICY_DRF, ORYX_ORDER_SC, &tu, NULL) == ORYX_OK) {
 			struct oryx_exec e;
-			CHECK(oryx_exec_map(&tu, &e) == ORYX_OK, "map succeeds (bytes are copied+protected)");
+			CHECK(oryx_exec_map(&tu, &e) == ORYX_OK, "map succeeds (RET-terminated block)");
+			CHECK(oryx_exec_run(&e, &gd) == ORYX_ERR_UNSUPPORTED, "run returns UNSUPPORTED off AArch64");
 			oryx_exec_free(&e);
-			CHECK(oryx_exec_run(&e, NULL) == ORYX_ERR_INVAL || !oryx_run_supported(), "run guarded off-arch");
 			oryx_tu_free(&tu);
 		}
 		printf("\n%d passed, %d failed (host guards only)\n", g_pass, g_fail);
@@ -191,7 +216,7 @@ int main(void)
 	test_mov_imm64();
 	test_memory_paths();
 	test_atomics();
-	test_fence_and_cmp_smoke();
+	test_flags_and_fence();
 	printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;
 }

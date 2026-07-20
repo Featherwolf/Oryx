@@ -52,7 +52,8 @@ enum oryx_gop {
 	/* --- Door 3: synchronization (always ordered, policy-independent) --- */
 	GOP_ATOMIC_ADD,  /* LOCK ADD [rn], rd   -> LDADDAL (acq+rel), disp 0    */
 	GOP_ATOMIC_CAS,  /* LOCK CMPXCHG [rn]    -> CASAL (RAX=cmp, rd=desired)  */
-	GOP_FENCE        /* MFENCE/LFENCE/SFENCE -> DMB ISH/ISHLD/ISHST (via cc) */
+	GOP_FENCE,       /* MFENCE/LFENCE/SFENCE -> DMB ISH/ISHLD/ISHST (via cc) */
+	GOP_SETCC        /* rd = (cc) ? 1 : 0  (x86 SETcc) -> CSET Xrd, cond     */
 };
 
 /*

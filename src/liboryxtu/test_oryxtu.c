@@ -271,6 +271,21 @@ static void test_exact_tso_mapping(void)
 	oryx_tu_free(&tu); oryx_tu_free(&sc);
 }
 
+static void test_setcc(void)
+{
+	printf("test: SETcc -> CSET encoding\n");
+	struct oryx_ginsn b[3]; size_t n = 0;
+	b[n++] = (struct oryx_ginsn){ .op = GOP_SETCC, .rd = GR_RDX, .cc = GCC_EQ };  /* CSET X2,EQ */
+	b[n++] = (struct oryx_ginsn){ .op = GOP_SETCC, .rd = GR_RBX, .cc = GCC_LT };  /* CSET X3,LT */
+	b[n++] = (struct oryx_ginsn){ .op = GOP_RET };
+	struct oryx_tu tu;
+	CHECK(oryx_translate(b, n, 0x6000, 12, 0, &tu) == ORYX_OK, "translate setcc");
+	CHECK(word_at(&tu, 0) == 0x9A9F17E2u, "CSET X2,EQ (cond field = NE, inverted)");
+	CHECK(word_at(&tu, 4) == 0x9A9FA7E3u, "CSET X3,LT (cond field = GE, inverted)");
+	CHECK(word_at(&tu, 8) == 0xD65F03C0u, "RET");
+	oryx_tu_free(&tu);
+}
+
 static void test_rcpc_mapping(void)
 {
 	printf("test: RCpc mapping (LDAPR/STLR = cheapest exact-TSO on FEAT_LRCPC)\n");
@@ -331,6 +346,7 @@ int main(void)
 	test_memory_model();
 	test_barrier_reduction();
 	test_exact_tso_mapping();
+	test_setcc();
 	test_rcpc_mapping();
 	test_hash_folds_mclass();
 	printf("\n%d passed, %d failed\n", g_pass, g_fail);

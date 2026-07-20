@@ -17,6 +17,15 @@
  * and the block reads/writes that memory. Multi-block control-flow dispatch
  * (resolving branch relocations, a guest-PC->host-block map) is the next build.
  *
+ * Address-space caveat: because guest and host addresses are identified, the
+ * runtime's OWN writable state — in particular the struct oryx_guest register
+ * file passed to oryx_exec_run — is guest-reachable. Guest code that computes a
+ * base address aliasing that register file would observe/clobber it mid-run
+ * (the trampoline holds x0..x15 in CPU registers across the block, so a store
+ * into regs[] does not take effect until after RET). Callers must keep guest
+ * memory disjoint from the oryx_guest they pass in. A real VM gives the guest a
+ * separate address window; this identity-mapped reference runtime does not.
+ *
  * Executing AArch64 requires an AArch64 host (real device, or this repo's tests
  * under qemu-aarch64). On any other arch the map/run calls return
  * ORYX_ERR_UNSUPPORTED so the library still builds and links everywhere.
@@ -48,14 +57,21 @@ struct oryx_exec {
 
 /* Returned in addition to the ORYX_ERR_* set in oryxcache.h. */
 #ifndef ORYX_ERR_UNSUPPORTED
-#define ORYX_ERR_UNSUPPORTED (-100)
+#define ORYX_ERR_UNSUPPORTED (-100)   /* cannot execute AArch64 on this host    */
+#endif
+#ifndef ORYX_ERR_PERM
+#define ORYX_ERR_PERM        (-101)   /* exec mapping denied by W^X/SELinux policy */
 #endif
 
 /*
  * Map a TU's code into an executable region (mmap RW -> memcpy -> mprotect RX ->
- * clear icache). Fails with ORYX_ERR_INVAL on a NULL/empty or unresolved-branch
- * TU (this build executes only straight-line blocks: reloc_count must be 0),
- * ORYX_ERR_UNSUPPORTED off AArch64, ORYX_ERR_NOMEM on mmap/mprotect failure.
+ * clear icache). Arch-independent (it only copies + protects bytes), so it
+ * succeeds on any POSIX host — the bytes are just not runnable off AArch64;
+ * oryx_exec_run is the arch-gated part. Fails with ORYX_ERR_INVAL on a
+ * NULL/empty TU, one with unresolved branch relocations (this build executes
+ * only straight-line blocks: reloc_count must be 0), or one not ending in RET;
+ * ORYX_ERR_FORMAT if code_len is not a multiple of 4; ORYX_ERR_PERM if the exec
+ * mapping is denied by policy; ORYX_ERR_NOMEM on other mmap/mprotect failure.
  */
 int  oryx_exec_map(const struct oryx_tu *tu, struct oryx_exec *out);
 void oryx_exec_free(struct oryx_exec *e);
