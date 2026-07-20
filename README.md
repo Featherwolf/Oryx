@@ -1,5 +1,7 @@
 # Project Oryx
 
+[![CI](https://github.com/Featherwolf/Oryx/actions/workflows/ci.yml/badge.svg)](https://github.com/Featherwolf/Oryx/actions/workflows/ci.yml)
+
 **Rosetta-class x86-on-ARM for the Samsung Galaxy S26 Ultra.**
 
 Oryx is not a new emulator. It is a thin layer that slots **under** existing Android
@@ -45,7 +47,8 @@ tested components exist. What builds and passes tests today:
 | `src/liboryxtu` | Part B reference **deterministic** x86-64→AArch64 translator | **built & tested** (29 assertions) |
 | `src/liboryxprofile` | Part C auto-tuning profile engine | **built & tested** (27 assertions) |
 
-Build and test the host components: `cd src && make check`.
+Build and test everything from the repo root: `make check`. Full testing guide (host, CI, and
+the on-device Phase 0 experiment): [`TESTING.md`](TESTING.md).
 
 The project is gated on a single decisive experiment:
 

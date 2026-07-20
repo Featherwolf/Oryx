@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    name: Host build + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run all userspace test suites
+        run: make -C src check
+      - name: Phase 0 litmus self-test (host)
+        run: make -C experiments/phase0-tso-probe/litmus selftest
+
+  aarch64-cross-build:
+    name: aarch64 cross-build (Snapdragon 8 Elite Gen 5 target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install aarch64 toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Cross-compile the Phase 0 litmus (real DMB ISH path)
+        run: make -C experiments/phase0-tso-probe/litmus CC=aarch64-linux-gnu-gcc
+      - name: Cross-compile all userspace libraries and tools
+        run: make -C src CC=aarch64-linux-gnu-gcc
