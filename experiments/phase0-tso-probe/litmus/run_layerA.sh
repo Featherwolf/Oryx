@@ -70,28 +70,31 @@ candidate_pairs() {
                 print out;
             }')
     fi
-    # dedup while preserving order; append blind fallbacks
-    printf "%s 0:1 0:4 2:6 4:5 6:7\n" "$auto" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' '
+    # dedup while preserving order; a focused spread (within/cross cluster).
+    # Kept short on purpose: on low-yield silicon the scan only needs to find a
+    # LIVE pair, not finely rank them — confidence comes from ITERS, not scanning.
+    printf "%s 0:1 4:5 6:7 0:6\n" "$auto" \
+        | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' '
 }
 
-# --- find a pair whose PLAIN SB control fires (harness is sensitive) ----------
+# --- find the MOST sensitive pair (max plain SB), not just the first to fire --
 SCAN_ITERS=$(( ITERS / 4 )); [ "$SCAN_ITERS" -lt 2000000 ] && SCAN_ITERS=2000000
-A=""; B=""
+A=""; B=""; best_sb=-1
 if [ -n "${PAIR:-}" ]; then
     A=$(echo "$PAIR" | cut -d: -f1); B=$(echo "$PAIR" | cut -d: -f2)
 else
-    echo "scanning core pairs for SB sensitivity (plain SB > 0) ..."
+    echo "scanning core pairs for SB sensitivity (picking the MAX plain SB) ..."
     for p in $(candidate_pairs); do
         pa=$(echo "$p" | cut -d: -f1); pb=$(echo "$p" | cut -d: -f2)
         [ "$pa" = "$pb" ] && continue
         s=$(witnesses sb plain "$pa" "$pb" "$SCAN_ITERS")
         [ -z "$s" ] && s=0
         printf "   pair %-5s plain SB(%s iters) = %s\n" "$pa:$pb" "$SCAN_ITERS" "$s"
-        if [ "$s" -gt 0 ] 2>/dev/null; then A=$pa; B=$pb; break; fi
+        if [ "$s" -gt "$best_sb" ] 2>/dev/null; then best_sb=$s; A=$pa; B=$pb; fi
     done
-    if [ -z "$A" ]; then
-        # none fired at scan depth; fall back to the auto pair and let the full
-        # run (more iters) try — verdict logic still guards on plain SB.
+    echo "   -> most sensitive: $A:$B (plain SB = $best_sb)"
+    if [ "$best_sb" -le 0 ] 2>/dev/null; then
+        # nothing fired at scan depth; keep the max pair and let full iters try.
         first=$(candidate_pairs | awk '{print $1}')
         A=$(echo "$first" | cut -d: -f1); B=$(echo "$first" | cut -d: -f2)
         echo "   (no pair fired at scan depth; using $A:$B at full iters — raise ITERS if still INCONCLUSIVE)"
@@ -166,12 +169,22 @@ done
 #     NOTE: this proves ONLY the store->load (W->R) half of TSO-exactness. The
 #     multi-copy-atomicity half (IRIW/WRC) is a SEPARATE property this 2-thread
 #     test cannot see — see the caveat printed at the end.
+LOWCONF=""
+if [ "$sb_plain" -lt 30 ] 2>/dev/null; then
+    LOWCONF="yes"
+fi
 if gt0 "$sb_rcpc" && gt0 "$sb_dmb"; then
     if eq0 "$sb_sc"; then
         echo " W->R EXACTNESS CONFIRMED: rcpc SB=$sb_rcpc, dmb SB=$sb_dmb (both fire) while"
         echo "   sc SB=0 (suppressed). On the store->load axis LDAPR/STLR matches x86-TSO"
         echo "   exactly (keeps the store-buffer outcome TSO allows) and sc is provably"
         echo "   over-strong. This is HALF of exact-TSO; see the MCA caveat below."
+        if [ -n "$LOWCONF" ]; then
+            echo "   LOW CONFIDENCE: plain SB=$sb_plain is small — the signature is the right"
+            echo "   SHAPE but the counts are near the noise floor. Confirm with a long run:"
+            echo "       ITERS=500000000 PAIR=$A:$B sh run_layerA.sh"
+            echo "   You want plain/rcpc/dmb SB in the tens+ and sc SB still exactly 0."
+        fi
     else
         echo " PARTIAL: rcpc/dmb keep SB (good) but sc SB=$sb_sc also fired. Expected"
         echo "   sc to suppress it; sc may be under-fenced on this core, or the pair"
