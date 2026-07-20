@@ -13,6 +13,8 @@ src/liboryxtu/test_oryxtu
 src/liboryxmap/test_oryxmap
 src/liboryxprofile/test_profile
 src/liboryxprofile/oryxprofile
+src/liboryxrun/test_oryxrun
+src/liboryxrun/test_oryxrun_a64
 
 # Test scratch
 **/_testcache

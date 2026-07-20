@@ -7,7 +7,7 @@
 #
 # See TESTING.md for the full guide (host tests, CI, and on-device Phase 0).
 
-.PHONY: all check aarch64 clean
+.PHONY: all check check-qemu aarch64 clean
 
 all:
 	$(MAKE) -C src all
@@ -19,6 +19,12 @@ check:
 	$(MAKE) -C experiments/phase0-tso-probe/litmus selftest
 	@echo ""
 	@echo "All Oryx host checks complete."
+
+# Behavioural test: cross-build the translator's output static for AArch64 and
+# EXECUTE it under qemu-aarch64 (proves the mapping runs, not just encodes).
+# Auto-skips if the cross toolchain or qemu are unavailable.
+check-qemu:
+	$(MAKE) -C src check-qemu
 
 # Prove the whole tree builds for aarch64 (the Snapdragon 8 Elite Gen 5 target).
 aarch64:
