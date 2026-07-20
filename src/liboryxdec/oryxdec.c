@@ -118,29 +118,31 @@ int oryx_x86_decode_block(const struct oryx_x86_image *img, uint64_t pc,
 		/* ---- MOV ---- */
 		case 0x89:  /* MOV r/m, r */
 			if ((rc = decode_modrm(img, &off, &cur, rexR, rexB, &mrm)) != ORYX_OK) return rc;
-			if (mrm.is_mem) return ORYX_ERR_UNSUPPORTED;
+			if (mrm.is_mem || !rexW) return ORYX_ERR_UNSUPPORTED;   /* 32-bit form zero-extends */
 			EMIT(((struct oryx_ginsn){ .op = GOP_MOV_RR, .rd = mrm.rm_reg, .rn = mrm.reg }));
 			break;
 		case 0x8B:  /* MOV r, r/m */
 			if ((rc = decode_modrm(img, &off, &cur, rexR, rexB, &mrm)) != ORYX_OK) return rc;
-			if (mrm.is_mem) return ORYX_ERR_UNSUPPORTED;
+			if (mrm.is_mem || !rexW) return ORYX_ERR_UNSUPPORTED;
 			EMIT(((struct oryx_ginsn){ .op = GOP_MOV_RR, .rd = mrm.reg, .rn = mrm.rm_reg }));
 			break;
 		case 0x8D:  /* LEA r, m */
 			if ((rc = decode_modrm(img, &off, &cur, rexR, rexB, &mrm)) != ORYX_OK) return rc;
-			if (!mrm.is_mem) return ORYX_ERR_UNSUPPORTED;   /* LEA needs a memory operand */
+			if (!mrm.is_mem || !rexW) return ORYX_ERR_UNSUPPORTED;  /* 32-bit LEA truncates addr */
 			EMIT(((struct oryx_ginsn){ .op = GOP_LEA, .rd = mrm.reg, .rn = mrm.base, .imm = mrm.disp }));
 			break;
-		case 0xC7: { /* MOV r/m, imm32 (sign-extended) — /0 only */
+		case 0xC7: { /* MOV r/m, imm32 (sign-extended to 64) — /0, REX.W only */
 			if ((rc = decode_modrm(img, &off, &cur, rexR, rexB, &mrm)) != ORYX_OK) return rc;
-			if (mrm.is_mem || (mrm.reg & 7) != 0) return ORYX_ERR_UNSUPPORTED;
+			if (mrm.is_mem || !rexW || (mrm.reg & 7) != 0) return ORYX_ERR_UNSUPPORTED;
 			if (off + 4 > img->len) return ORYX_ERR_FORMAT;
 			int64_t imm = (int32_t)rd_u32(&img->bytes[off]); off += 4; cur += 4;
 			EMIT(((struct oryx_ginsn){ .op = GOP_MOV_RI, .rd = mrm.rm_reg, .imm = imm }));
 			break;
 		}
 
-		/* ---- ALU reg,reg (r/m,r) ---- */
+		/* ---- ALU reg,reg (r/m,r) — REX.W (64-bit) only; the 32-bit forms
+		 *      zero-extend the result / set 32-bit flags, which the 64-bit IR
+		 *      can't express, so they decode to UNSUPPORTED rather than wrong. --- */
 		case 0x01:  /* ADD r/m, r */
 		case 0x29:  /* SUB r/m, r */
 		case 0x31:  /* XOR r/m, r */
@@ -149,7 +151,7 @@ int oryx_x86_decode_block(const struct oryx_x86_image *img, uint64_t pc,
 		case 0x39:  /* CMP r/m, r */
 		case 0x85:  /* TEST r/m, r */
 			if ((rc = decode_modrm(img, &off, &cur, rexR, rexB, &mrm)) != ORYX_OK) return rc;
-			if (mrm.is_mem) return ORYX_ERR_UNSUPPORTED;
+			if (mrm.is_mem || !rexW) return ORYX_ERR_UNSUPPORTED;
 			{
 				int gop = (op==0x01)?GOP_ADD_RR : (op==0x29)?GOP_SUB_RR :
 					  (op==0x31)?GOP_XOR_RR : (op==0x21)?GOP_AND_RR :
@@ -159,15 +161,15 @@ int oryx_x86_decode_block(const struct oryx_x86_image *img, uint64_t pc,
 			break;
 		case 0x3B:  /* CMP r, r/m */
 			if ((rc = decode_modrm(img, &off, &cur, rexR, rexB, &mrm)) != ORYX_OK) return rc;
-			if (mrm.is_mem) return ORYX_ERR_UNSUPPORTED;
+			if (mrm.is_mem || !rexW) return ORYX_ERR_UNSUPPORTED;
 			EMIT(((struct oryx_ginsn){ .op = GOP_CMP_RR, .rd = mrm.reg, .rn = mrm.rm_reg }));
 			break;
 
-		/* ---- ALU r/m, imm (group 1) ---- */
+		/* ---- ALU r/m, imm (group 1) — REX.W (64-bit) only ---- */
 		case 0x83:  /* r/m, imm8 (sign-extended) */
 		case 0x81:  /* r/m, imm32 (sign-extended) */
 			if ((rc = decode_modrm(img, &off, &cur, rexR, rexB, &mrm)) != ORYX_OK) return rc;
-			if (mrm.is_mem) return ORYX_ERR_UNSUPPORTED;
+			if (mrm.is_mem || !rexW) return ORYX_ERR_UNSUPPORTED;
 			{
 				int64_t imm;
 				if (op == 0x83) {

@@ -48,9 +48,9 @@ static void test_encodings(void)
 	struct oryx_tu tu;
 	CHECK(oryx_translate(b, n, 0x400000, 16, 3, &tu) == ORYX_OK, "translate sample");
 
-	/* MOVZ X0,#0x1234 ; ADD X0,X0,X1 ; SUBS XZR,X0,X3 ; B.EQ +0 */
+	/* MOVZ X0,#0x1234 ; ADDS X0,X0,X1 ; SUBS XZR,X0,X3 ; B.EQ +0 */
 	CHECK(word_at(&tu, 0)  == 0xD2824680u, "MOVZ X0,#0x1234");
-	CHECK(word_at(&tu, 4)  == 0x8B010000u, "ADD X0,X0,X1");
+	CHECK(word_at(&tu, 4)  == 0xAB010000u, "ADDS X0,X0,X1 (x86 ADD sets flags)");
 	CHECK(word_at(&tu, 8)  == 0xEB03001Fu, "SUBS XZR,X0,X3 (cmp)");
 	CHECK(word_at(&tu, 12) == 0x54000000u, "B.EQ +0 (reloc-patched later)");
 	CHECK(tu.code_len == 16, "4 instructions => 16 bytes");

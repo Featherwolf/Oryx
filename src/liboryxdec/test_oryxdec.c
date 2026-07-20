@@ -72,6 +72,31 @@ static void test_decode(void)
 
 	/* Out-of-range PC. */
 	CHECK(oryx_x86_decode_block(&img, GBASE + 1000, ops, 16, &n, &len) == ORYX_ERR_NOTFOUND, "OOB pc -> NOTFOUND");
+
+	/* Non-REX.W (32-bit) size-sensitive forms must be REJECTED, not silently
+	 * mistranslated as 64-bit. Standalone snippets, each ending in RET. */
+	{
+		/* 01 d0 (add %edx,%eax, 32-bit) ; c3 */
+		static const uint8_t add32[] = { 0x01, 0xd0, 0xc3 };
+		struct oryx_x86_image i32 = { add32, sizeof(add32), GBASE };
+		CHECK(oryx_x86_decode_block(&i32, GBASE, ops, 16, &n, &len) == ORYX_ERR_UNSUPPORTED,
+		      "32-bit ADD (no REX.W) -> UNSUPPORTED (not silent 64-bit)");
+		/* 89 c1 (mov %eax,%ecx, 32-bit) ; c3 */
+		static const uint8_t mov32[] = { 0x89, 0xc1, 0xc3 };
+		struct oryx_x86_image m32 = { mov32, sizeof(mov32), GBASE };
+		CHECK(oryx_x86_decode_block(&m32, GBASE, ops, 16, &n, &len) == ORYX_ERR_UNSUPPORTED,
+		      "32-bit MOV (no REX.W) -> UNSUPPORTED");
+		/* 39 d0 (cmp %edx,%eax, 32-bit) ; c3 — 32-bit flags differ */
+		static const uint8_t cmp32[] = { 0x39, 0xd0, 0xc3 };
+		struct oryx_x86_image c32 = { cmp32, sizeof(cmp32), GBASE };
+		CHECK(oryx_x86_decode_block(&c32, GBASE, ops, 16, &n, &len) == ORYX_ERR_UNSUPPORTED,
+		      "32-bit CMP (no REX.W) -> UNSUPPORTED");
+		/* Same ops WITH REX.W (48 prefix) must decode fine. */
+		static const uint8_t add64[] = { 0x48, 0x01, 0xd0, 0xc3 };
+		struct oryx_x86_image i64 = { add64, sizeof(add64), GBASE };
+		CHECK(oryx_x86_decode_block(&i64, GBASE, ops, 16, &n, &len) == ORYX_OK &&
+		      ops[0].op == GOP_ADD_RR, "64-bit ADD (REX.W) decodes fine");
+	}
 }
 
 /* ---- execution checks (AArch64/qemu) ------------------------------------ */

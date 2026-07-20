@@ -34,8 +34,14 @@ static uint32_t enc_subs_imm(int rn,uint32_t imm12){ return 0xF100001Fu | ((imm1
 static uint32_t enc_adds_imm(int rn,uint32_t imm12){ return 0xB100001Fu | ((imm12&0xfffu)<<10) | ((uint32_t)rn<<5); } /* ADDS XZR,Xn,#imm (CMN) */
 static uint32_t enc_tst_rr(int rn,int rm){ return 0xEA00001Fu | ((uint32_t)rm<<16) | ((uint32_t)rn<<5); } /* ANDS XZR,Xn,Xm (TST) */
 static uint32_t enc_eor_rr(int rd,int rn,int rm){ return 0xCA000000u | ((uint32_t)rm<<16) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* EOR Xd,Xn,Xm */
-static uint32_t enc_and_rr(int rd,int rn,int rm){ return 0x8A000000u | ((uint32_t)rm<<16) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* AND Xd,Xn,Xm */
 static uint32_t enc_orr_rr2(int rd,int rn,int rm){ return 0xAA000000u | ((uint32_t)rm<<16) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* ORR Xd,Xn,Xm */
+/* Flag-SETTING forms — x86 ADD/SUB/AND set NZCV, so the IR must too (else a
+ * following Jcc/SETcc reads stale flags). LEA/MOV stay non-flag-setting. */
+static uint32_t enc_adds_rr(int rd,int rn,int rm){ return 0xAB000000u | ((uint32_t)rm<<16) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* ADDS Xd,Xn,Xm */
+static uint32_t enc_subs_rr(int rd,int rn,int rm){ return 0xEB000000u | ((uint32_t)rm<<16) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* SUBS Xd,Xn,Xm */
+static uint32_t enc_ands_rr(int rd,int rn,int rm){ return 0xEA000000u | ((uint32_t)rm<<16) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* ANDS Xd,Xn,Xm */
+static uint32_t enc_adds_imm_rd(int rd,int rn,uint32_t imm12){ return 0xB1000000u | ((imm12&0xfffu)<<10) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* ADDS Xd,Xn,#imm */
+static uint32_t enc_subs_imm_rd(int rd,int rn,uint32_t imm12){ return 0xF1000000u | ((imm12&0xfffu)<<10) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* SUBS Xd,Xn,#imm */
 static uint32_t enc_ldaddal(int rs,int rt,int rn){ return 0xF8E00000u | ((uint32_t)rs<<16) | ((uint32_t)rn<<5) | (uint32_t)rt; } /* LDADDAL Xs,Xt,[Xn] */
 static uint32_t enc_casal(int rs,int rt,int rn){ return 0xC8E0FC00u | ((uint32_t)rs<<16) | ((uint32_t)rn<<5) | (uint32_t)rt; } /* CASAL Xs,Xt,[Xn] */
 /* CSET Xd, cond = CSINC Xd, XZR, XZR, invert(cond) -> Xd = (cond) ? 1 : 0.
@@ -184,11 +190,11 @@ int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 			if (emit_movimm(&code, in->rd, (uint64_t)in->imm) != ORYX_OK)
 				FAIL(ORYX_ERR_NOMEM);
 			break;
-		case GOP_ADD_RR:
-			EMIT(enc_add_rr(in->rd, in->rd, in->rn));
+		case GOP_ADD_RR:               /* x86 ADD sets flags -> ADDS */
+			EMIT(enc_adds_rr(in->rd, in->rd, in->rn));
 			break;
-		case GOP_SUB_RR:
-			EMIT(enc_sub_rr(in->rd, in->rd, in->rn));
+		case GOP_SUB_RR:               /* x86 SUB sets flags -> SUBS */
+			EMIT(enc_subs_rr(in->rd, in->rd, in->rn));
 			break;
 		case GOP_CMP_RR:               /* flags from (rd - rn) */
 			EMIT(enc_subs_cmp(in->rd, in->rn));
@@ -259,23 +265,36 @@ int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 		case GOP_SETCC:                    /* rd = (cc) ? 1 : 0 -> CSET Xrd,cond */
 			EMIT(enc_cset(in->rd, arm_cond(in->cc)));
 			break;
-		case GOP_ADD_RI:                   /* rd = rd + imm */
-		case GOP_SUB_RI:                   /* rd = rd - imm */
-		case GOP_LEA: {                    /* rd = rn + imm */
-			int base = (in->op == GOP_LEA) ? in->rn : in->rd;
-			int64_t eff = (in->op == GOP_SUB_RI) ? -in->imm : in->imm;
+		case GOP_LEA: {                    /* rd = rn + imm — x86 LEA sets NO flags */
+			int64_t eff = in->imm;
 			if (eff >= 0 && eff <= 0xFFF) {
-				EMIT(enc_add_imm(in->rd, base, (uint32_t)eff));
+				EMIT(enc_add_imm(in->rd, in->rn, (uint32_t)eff));
 			} else if (eff < 0 && eff >= -0xFFF) {
-				EMIT(enc_sub_imm(in->rd, base, (uint32_t)(-eff)));
+				EMIT(enc_sub_imm(in->rd, in->rn, (uint32_t)(-eff)));
 			} else {
 				if (emit_movimm(&code, ORYX_SCRATCH, (uint64_t)eff) != ORYX_OK)
 					FAIL(ORYX_ERR_NOMEM);
-				EMIT(enc_add_rr(in->rd, base, ORYX_SCRATCH));
+				EMIT(enc_add_rr(in->rd, in->rn, ORYX_SCRATCH));
 			}
 			break;
 		}
-		case GOP_CMP_RI:                   /* flags = rd - imm */
+		case GOP_ADD_RI:                   /* rd = rd + imm — x86 ADD sets flags (ADDS) */
+		case GOP_SUB_RI: {                 /* rd = rd - imm — x86 SUB sets flags (SUBS) */
+			/* Effective subtrahend for SUBS: ADD_RI x = rd-(-x); express both as
+			 * a signed delta and pick ADDS/SUBS #imm, or materialize. */
+			int64_t d = (in->op == GOP_ADD_RI) ? in->imm : -in->imm;  /* rd = rd + d */
+			if (d >= 0 && d <= 0xFFF) {
+				EMIT(enc_adds_imm_rd(in->rd, in->rd, (uint32_t)d));
+			} else if (d < 0 && d >= -0xFFF) {
+				EMIT(enc_subs_imm_rd(in->rd, in->rd, (uint32_t)(-d)));
+			} else {
+				if (emit_movimm(&code, ORYX_SCRATCH, (uint64_t)d) != ORYX_OK)
+					FAIL(ORYX_ERR_NOMEM);
+				EMIT(enc_adds_rr(in->rd, in->rd, ORYX_SCRATCH));
+			}
+			break;
+		}
+		case GOP_CMP_RI:                   /* flags = rd - imm (writes no register) */
 			if (in->imm >= 0 && in->imm <= 0xFFF) {
 				EMIT(enc_subs_imm(in->rd, (uint32_t)in->imm));
 			} else if (in->imm < 0 && in->imm >= -0xFFF) {
@@ -287,9 +306,15 @@ int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 			}
 			break;
 		case GOP_TEST_RR: EMIT(enc_tst_rr(in->rd, in->rn)); break;   /* flags = rd & rn */
-		case GOP_XOR_RR:  EMIT(enc_eor_rr(in->rd, in->rd, in->rn)); break;
-		case GOP_AND_RR:  EMIT(enc_and_rr(in->rd, in->rd, in->rn)); break;
-		case GOP_OR_RR:   EMIT(enc_orr_rr2(in->rd, in->rd, in->rn)); break;
+		case GOP_AND_RR:  EMIT(enc_ands_rr(in->rd, in->rd, in->rn)); break;  /* x86 AND sets flags */
+		case GOP_XOR_RR:  /* x86 XOR/OR set flags; EOR/ORR have no S-form, so set flags */
+			EMIT(enc_eor_rr(in->rd, in->rd, in->rn));   /* via a trailing TST of the result. */
+			EMIT(enc_tst_rr(in->rd, in->rd));
+			break;
+		case GOP_OR_RR:
+			EMIT(enc_orr_rr2(in->rd, in->rd, in->rn));
+			EMIT(enc_tst_rr(in->rd, in->rd));
+			break;
 		case GOP_BR:
 			ADD_RELOC((uint32_t)code.len, ORYX_RELOC_BRANCH_GUEST_PC, in->target);
 			EMIT(enc_bcond(arm_cond(in->cc)));

@@ -232,6 +232,19 @@ static void test_new_alu(void)
 		CHECK(g.regs[GR_RCX] == 1, "CMP_RI 5 > -1 -> GT (CMN path)");
 		CHECK(g.regs[GR_RDX] == 0, "CMP_RI 5 > -1 -> LT clear");
 	}
+	{	/* SUB_RI / ADD_RR set flags (x86 semantics): 5-5 -> ZF; SETcc EQ -> 1. */
+		struct oryx_ginsn ops[5]; size_t k = 0;
+		ops[k++] = I(GOP_MOV_RI, GR_RAX, 0, 5);
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_SUB_RI, .rd = GR_RAX, .imm = 5 };  /* RAX=0, ZF */
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_SETCC, .rd = GR_RCX, .cc = GCC_EQ };
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_SETCC, .rd = GR_RDX, .cc = GCC_NE };
+		ops[k++] = I(GOP_RET, 0, 0, 0);
+		struct oryx_guest g = {0};
+		CHECK(run_block(ops, k, ORYX_POLICY_DRF, ORYX_ORDER_SC, &g) == ORYX_OK, "sub_ri flags run");
+		CHECK(g.regs[GR_RAX] == 0, "SUB_RI 5-5 = 0");
+		CHECK(g.regs[GR_RCX] == 1, "SUB_RI set ZF -> SETcc EQ = 1");
+		CHECK(g.regs[GR_RDX] == 0, "SUB_RI set ZF -> SETcc NE = 0");
+	}
 }
 
 /* ---- multi-block dispatcher tests --------------------------------------- */
@@ -276,6 +289,25 @@ static int fetch_longchain(uint64_t pc, struct oryx_ginsn *ops, size_t cap,
 		*n = 2; *len = 0x100; return ORYX_OK;
 	}
 	if (pc == LC_BASE + LC_N * 0x100ull) { ops[0] = I(GOP_RET, 0, 0, 0); *n = 1; *len = 4; return ORYX_OK; }
+	return ORYX_ERR_NOTFOUND;
+}
+
+/* Guest program that branches on an ALU result's FLAGS directly (no CMP), the
+ * exact case that fails if arithmetic ops don't set flags:
+ *   0x3000: RAX += RCX ; RCX -= 1 (sets ZF at 0) ; BR NE -> 0x3000 (else 0x4000)
+ *   0x4000: RET.  With RAX=0,RCX=5 -> RAX = 5+4+3+2+1 = 15. */
+static int fetch_decloop(uint64_t pc, struct oryx_ginsn *ops, size_t cap,
+			 size_t *n, uint32_t *len, void *ctx)
+{
+	(void)ctx; (void)cap;
+	if (pc == 0x3000) {
+		size_t k = 0;
+		ops[k++] = I(GOP_ADD_RR, GR_RAX, GR_RCX, 0);
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_SUB_RI, .rd = GR_RCX, .imm = 1 };  /* sets flags */
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_BR, .cc = GCC_NE, .target = 0x3000 };
+		*n = k; *len = 0x1000; return ORYX_OK;                                        /* fall-through 0x4000 */
+	}
+	if (pc == 0x4000) { ops[0] = I(GOP_RET, 0, 0, 0); *n = 1; *len = 4; return ORYX_OK; }
 	return ORYX_ERR_NOTFOUND;
 }
 
@@ -343,6 +375,17 @@ static void test_dispatcher(void)
 		int rc = oryx_run_program(fetch_jmpchain, NULL, ORYX_POLICY_DRF, ORYX_ORDER_SC,
 					  0x999, &g, 1000, NULL);
 		CHECK(rc == ORYX_ERR_NOTFOUND, "unknown entry PC -> NOTFOUND");
+	}
+	/* Branch on an ALU result's flags directly (SUB_RI must set flags). */
+	{
+		struct oryx_guest g = {0};
+		g.regs[GR_RAX] = 0; g.regs[GR_RCX] = 5;
+		uint64_t steps = 0;
+		int rc = oryx_run_program(fetch_decloop, NULL, ORYX_POLICY_DRF, ORYX_ORDER_SC,
+					  0x3000, &g, 1000, &steps);
+		CHECK(rc == ORYX_OK, "dec-loop ran to halt");
+		CHECK(g.regs[GR_RAX] == 15, "RAX = 15 (branch consumed SUB_RI's flags, not stale)");
+		CHECK(g.regs[GR_RCX] == 0, "counter reached 0");
 	}
 	/* 40-block chain: many distinct guest PCs through the hash cache. */
 	{
