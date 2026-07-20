@@ -188,6 +188,62 @@ static void test_wellformed(void)
 	oryx_tu_free(&tu);
 }
 
+static void test_memory_model(void)
+{
+	printf("test: Door 3 memory-model lowering (ordered/atomic encodings)\n");
+	struct oryx_ginsn b[8]; size_t n = 0;
+	b[n++] = (struct oryx_ginsn){ .op = GOP_LOAD,  .rd = GR_RAX, .rn = GR_RDI, .imm = 0, .mclass = ORYX_MCLASS_SHARED };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_STORE, .rd = GR_RAX, .rn = GR_RSI, .imm = 0, .mclass = ORYX_MCLASS_SHARED };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_ATOMIC_ADD, .rd = GR_RCX, .rn = GR_RDI };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_ATOMIC_CAS, .rd = GR_RDX, .rn = GR_RSI };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_FENCE, .cc = ORYX_FENCE_FULL };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_RET };
+
+	struct oryx_tu tu; struct oryx_mm_stats st;
+	CHECK(oryx_translate_ex(b, n, 0x2000, 24, 3, ORYX_POLICY_DRF, &tu, &st) == ORYX_OK,
+	      "translate_ex ok");
+	CHECK(word_at(&tu, 0)  == 0xC8DFFCE0u, "LDAR X0,[X7]  (shared load -> acquire)");
+	CHECK(word_at(&tu, 4)  == 0xC89FFCC0u, "STLR X0,[X6]  (shared store -> release)");
+	CHECK(word_at(&tu, 8)  == 0xF8E100FFu, "LDADDAL X1,XZR,[X7]  (LOCK ADD)");
+	CHECK(word_at(&tu, 12) == 0xC8E0FCC2u, "CASAL X0,X2,[X6]  (LOCK CMPXCHG)");
+	CHECK(word_at(&tu, 16) == 0xD5033BBFu, "DMB ISH  (MFENCE)");
+	CHECK(st.ordered_loads == 1 && st.ordered_stores == 1 &&
+	      st.atomics == 2 && st.fences == 1, "stats counted ordered+atomic+fence");
+	CHECK(st.plain_loads == 0 && st.plain_stores == 0, "no weak accesses in this block");
+	oryx_tu_free(&tu);
+}
+
+static void test_barrier_reduction(void)
+{
+	printf("test: DRF policy emits far fewer barriers than conservative\n");
+	struct oryx_ginsn b[8]; size_t n = 0;
+	/* 3 thread-local stack accesses + 2 genuinely-shared + 1 atomic. */
+	b[n++] = (struct oryx_ginsn){ .op = GOP_STORE, .rd = GR_RAX, .rn = GR_RSP, .imm = 8,  .mclass = ORYX_MCLASS_LOCAL };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_LOAD,  .rd = GR_RCX, .rn = GR_RSP, .imm = 16, .mclass = ORYX_MCLASS_LOCAL };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_STORE, .rd = GR_RDX, .rn = GR_RBP, .imm = 8,  .mclass = ORYX_MCLASS_LOCAL };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_LOAD,  .rd = GR_RSI, .rn = GR_RDI, .imm = 0,  .mclass = ORYX_MCLASS_SHARED };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_STORE, .rd = GR_RSI, .rn = GR_R8,  .imm = 0,  .mclass = ORYX_MCLASS_SHARED };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_ATOMIC_ADD, .rd = GR_RCX, .rn = GR_RDI };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_RET };
+
+	struct oryx_tu drf, con; struct oryx_mm_stats sd, sc;
+	CHECK(oryx_translate_ex(b, n, 0x3000, 28, 1, ORYX_POLICY_DRF, &drf, &sd) == ORYX_OK, "drf translate");
+	CHECK(oryx_translate_ex(b, n, 0x3000, 28, 1, ORYX_POLICY_CONSERVATIVE, &con, &sc) == ORYX_OK, "conservative translate");
+
+	uint32_t drf_ordered = sd.ordered_loads + sd.ordered_stores;
+	uint32_t con_ordered = sc.ordered_loads + sc.ordered_stores;
+	printf("      DRF ordered=%u weak=%u | CONSERVATIVE ordered=%u weak=%u\n",
+	       drf_ordered, sd.plain_loads + sd.plain_stores,
+	       con_ordered, sc.plain_loads + sc.plain_stores);
+	CHECK(drf_ordered == 2, "DRF orders only the 2 shared accesses");
+	CHECK(con_ordered == 5, "conservative orders all 5 ordinary accesses");
+	CHECK(drf_ordered < con_ordered, "DRF < conservative (fewer barriers = the win)");
+	CHECK(sd.plain_loads + sd.plain_stores == 3, "DRF runs the 3 stack accesses weak/free");
+	CHECK(sc.plain_loads + sc.plain_stores == 0, "conservative runs nothing weak");
+	CHECK(sd.atomics == 1 && sc.atomics == 1, "the real atomic stays ordered under both");
+	oryx_tu_free(&drf); oryx_tu_free(&con);
+}
+
 int main(void)
 {
 	test_encodings();
@@ -195,6 +251,8 @@ int main(void)
 	test_determinism();
 	test_cache_integration();
 	test_wellformed();
+	test_memory_model();
+	test_barrier_reduction();
 	printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;
 }

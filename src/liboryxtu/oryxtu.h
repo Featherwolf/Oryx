@@ -48,8 +48,23 @@ enum oryx_gop {
 	GOP_STORE,       /* [rn + imm] = rd                  */
 	GOP_BR,          /* if (cc) goto target ; terminates */
 	GOP_JMP,         /* goto target      ; terminates    */
-	GOP_RET          /* return           ; terminates    */
+	GOP_RET,         /* return           ; terminates    */
+	/* --- Door 3: synchronization (always ordered, policy-independent) --- */
+	GOP_ATOMIC_ADD,  /* LOCK ADD [rn], rd   -> LDADDAL (acq+rel), disp 0    */
+	GOP_ATOMIC_CAS,  /* LOCK CMPXCHG [rn]    -> CASAL (RAX=cmp, rd=desired)  */
+	GOP_FENCE        /* MFENCE/LFENCE/SFENCE -> DMB ISH/ISHLD/ISHST (via cc) */
 };
+
+/*
+ * Memory-ordering class for ordinary loads/stores (Door 3). LOCAL is the default
+ * (0): provably thread-local memory (stack/TLS) that no other thread can observe,
+ * lowered to plain weak LDR/STR. SHARED is potentially-shared memory, lowered to
+ * TSO-equivalent acquire/release (LDAR/STLR).
+ */
+enum oryx_mclass { ORYX_MCLASS_LOCAL = 0, ORYX_MCLASS_SHARED = 1 };
+
+/* Fence kinds for GOP_FENCE (carried in the `cc` field). */
+enum oryx_fence { ORYX_FENCE_FULL = 0, ORYX_FENCE_LD = 1, ORYX_FENCE_ST = 2 };
 
 struct oryx_ginsn {
 	int      op;      /* enum oryx_gop */
@@ -57,7 +72,23 @@ struct oryx_ginsn {
 	int      rn;      /* enum oryx_greg */
 	int64_t  imm;     /* MOV_RI value, or LOAD/STORE displacement */
 	uint64_t target;  /* guest PC for BR/JMP */
-	int      cc;      /* enum oryx_gcc for BR */
+	int      cc;      /* enum oryx_gcc for BR; enum oryx_fence for GOP_FENCE */
+	int      mclass;  /* enum oryx_mclass for LOAD/STORE (default LOCAL) */
+};
+
+/*
+ * Memory-model lowering policy (Door 3, docs/door3-drf-translation.md):
+ *   DRF          — respect each op's mclass: LOCAL weak, SHARED ordered (default)
+ *   CONSERVATIVE — order EVERY ordinary access (the Box64 STRONGMEM baseline)
+ */
+enum oryx_mm_policy { ORYX_POLICY_DRF = 0, ORYX_POLICY_CONSERVATIVE = 1 };
+
+/* Counts of how each memory op was lowered — the barrier-reduction metric. */
+struct oryx_mm_stats {
+	uint32_t plain_loads,  plain_stores;    /* weak LDR/STR (free)          */
+	uint32_t ordered_loads, ordered_stores; /* LDAR/STLR (the ordering tax) */
+	uint32_t atomics;                       /* LSE acq+rel                  */
+	uint32_t fences;                        /* DMB                          */
 };
 
 /* Identity tags stamped into produced TUs. */
@@ -77,6 +108,16 @@ struct oryx_ginsn {
 int oryx_translate(const struct oryx_ginsn *ops, size_t n,
 		   uint64_t guest_pc, uint32_t guest_len, uint32_t profile_id,
 		   struct oryx_tu *out);
+
+/*
+ * Door 3 translation with an explicit memory-model policy and optional stats.
+ * `oryx_translate` above is exactly this with ORYX_POLICY_DRF and stats = NULL.
+ * `stats` (nullable) receives the plain-vs-ordered breakdown.
+ */
+int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
+		      uint64_t guest_pc, uint32_t guest_len, uint32_t profile_id,
+		      enum oryx_mm_policy policy, struct oryx_tu *out,
+		      struct oryx_mm_stats *stats);
 
 #ifdef __cplusplus
 }

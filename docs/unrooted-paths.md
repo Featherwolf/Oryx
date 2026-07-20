@@ -85,6 +85,12 @@ conservative ordering), but for the common case it closes most of the gap with *
 modification** — and it's the same codegen work that makes the [portable cache](partB-translation-cache.md)
 deterministic, so it compounds.
 
+**Full design + tested reference:** [`docs/door3-drf-translation.md`](door3-drf-translation.md).
+The reference translator ([`src/liboryxtu`](../src/liboryxtu/)) implements the LOCAL/SHARED/ATOMIC
+lowering with real AArch64 encodings (`LDAR`/`STLR`/`LDADDAL`/`CASAL`/`DMB`) and a test that
+measures the win: on a representative block the DRF policy emits **2 ordered accesses vs the
+conservative policy's 5**, running the thread-local stack traffic barrier-free.
+
 ---
 
 ## What "no root" changes about the project
