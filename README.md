@@ -50,6 +50,8 @@ tested components exist. What builds and passes tests today:
 Build and test everything from the repo root: `make check`. Full testing guide (host, CI, and
 the on-device Phase 0 experiment): [`TESTING.md`](TESTING.md). Path from here to running a real
 game with an Oryx win (honest step count): [`docs/roadmap-to-device.md`](docs/roadmap-to-device.md).
+The flagship CPU-win engineering design (DRF classifier into Box64/FEX, corrected TSO mapping,
+no-root validation): [`docs/box64-fex-integration.md`](docs/box64-fex-integration.md).
 Launch wrapper that applies a tuned profile to a real game: [`tools/oryx-run.sh`](tools/oryx-run.sh).
 
 The project is gated on a single decisive experiment:

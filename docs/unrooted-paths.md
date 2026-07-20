@@ -41,19 +41,22 @@ Outcomes:
 - **"request DENIED"** → the stock kernel has no memory-model prctl (the expected result).
   Then the *true* no-root hardware path is Path 2; the software path is Path 3.
 
-## Path 2 — Get the prctl upstream, then it ships to everyone (the real no-root hardware answer)
+## Path 2 — A custom (bootloader-unlocked, no-root) kernel carrying the bit
 
-If we want the hardware bit on unmodified retail phones, the interface has to live in the
-kernel they ship. That means:
+> **Correction (verified):** the mainline Linux `PR_SET_MEM_MODEL` prctl was **rejected** by ARM
+> maintainers (Will Deacon's "strong objection" to exposing an IMPDEF opt-in). It lives only in
+> the Asahi downstream tree. So "get it upstream and it ships to everyone" is **not** on the
+> table — retail Android builds will not carry it.
 
-1. Port the ARM-Linux `PR_SET_MEM_MODEL` series to the **Android Common Kernel / GKI**, wired
-   to Oryon's specific control bit (whatever Phase 0 Step 2 discovers).
-2. Land Qualcomm/Samsung enablement so retail builds carry it.
-
-This is the Apple/Microsoft model — the OS vendor exposes it, users do nothing. It's the
-correct long-term answer and it is **genuinely no-root**, but it is a platform/vendor effort
-with a long timeline, not something we can flip on unilaterally. Phase 0 Step 2 (finding the
-bit) is the prerequisite that makes this a concrete, submittable patch instead of a wish.
+The only hardware-TSO route that doesn't require *root* is a **custom GKI kernel flashed onto a
+bootloader-unlocked device** (unlock ≠ root), carrying an Asahi-style EL1 patch that sets the
+Oryon control bit. This needs only EL1, so it can live as a downstream/vendor-module patch.
+Feasibility is gated on two unknowns: whether the **mobile** Oryon (S26 Ultra) actually exposes
+the `ACTLR` TSO bit (it is documented only for the *laptop* Snapdragon X Oryon — the mobile bit
+is **inferred, not confirmed**), and whether the device is unlockable without tripping
+anti-rollback. Phase 0 Step 2 (finding the bit on a throwaway device) is the prerequisite. This
+is real but narrow — **design the software path (Path 3) to degrade to a no-op if this ever
+lands**, and don't depend on it for the stock-phone product.
 
 ---
 

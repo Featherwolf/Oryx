@@ -31,8 +31,8 @@ indistinguishable from TSO. So:
 |---------------------|-------|------------------|----------|
 | Ordinary load, **thread-local form** (`[RSP/RBP+disp]`, `FS:`/`GS:` TLS) | LOCAL | `LDR` (offset) | **no** |
 | Ordinary store, thread-local form | LOCAL | `STR` (offset) | **no** |
-| Ordinary load, **general pointer** (maybe shared) | SHARED | `LDAPR` (RCpc; `LDAR` fallback) | yes |
-| Ordinary store, general pointer | SHARED | `STLR` | yes |
+| Ordinary load, **general pointer** (maybe shared) | SHARED | `LDR; DMB ISHLD` (exact-TSO) or `LDAR` (RCsc, conservative) | yes |
+| Ordinary store, general pointer | SHARED | `DMB ISHST; STR` (exact-TSO) or `STLR` | yes |
 | `LOCK`-prefixed RMW, `XCHG` mem (implicitly locked) | ATOMIC | LSE acq+rel — `LDADDAL` / `SWPAL` / `CASAL` … | yes |
 | `MFENCE` / `LFENCE` / `SFENCE` | FENCE | `DMB ISH` / `ISHLD` / `ISHST` | yes |
 
@@ -70,12 +70,28 @@ Refinements layered on top when available: allocator-tagged single-owner regions
 analysis for freshly-`malloc`'d, not-yet-published memory; and crowd-sourced per-game
 overrides (Part C).
 
-## Strength selection (use the cheapest correct primitive)
+## Strength selection (use the cheapest *correct* primitive)
 
-Oryon implements **FEAT_LRCPC**, so SHARED loads use **`LDAPR`** (RCpc acquire), which permits
-exactly the store→load reordering x86 TSO allows — matching TSO without over-ordering. `LDAR`
-(RCsc) is *stronger* than TSO and slower; the reference emits `LDAR` for clarity and notes
-`LDAPR` as the production substitution on FEAT_LRCPC hardware. SHARED stores use `STLR`.
+> **Correction (verified against the ARM memory model).** An earlier draft claimed `LDAPR`
+> (RCpc) + `STLR` equals x86-TSO. **It does not — RCpc is strictly *weaker* than TSO.** RCpc
+> relaxes multi-copy atomicity, so `LDAPR` can read a store-release value not yet globally
+> observed, permitting **WRC-style causality violations that x86-TSO forbids** (x86-TSO is
+> multi-copy atomic). So bare `LDAPR` is **unsound** for SHARED accesses.
+
+The two correct choices for a SHARED access are:
+
+- **Minimal exact-TSO — the DMB-fence scheme** (Arancini-proven, multi-copy-atomic on ARMv8):
+  load → `LDR; DMB ISHLD`, store → `DMB ISHST; STR`, `MFENCE` → `DMB ISH`. Each fence is proven
+  necessary-and-sufficient, and adjacent fences can be merged/eliminated. This preserves exactly
+  the W→R relaxation TSO allows.
+- **Conservative — acquire/release** `LDAR`(RCsc)/`STLR`: *stronger* than TSO (it also forbids
+  the W→R reorder, i.e. it's sequentially consistent for those accesses) — correct, simpler, but
+  over-costs. **This is what the reference `liboryxtu` emits** — safe by construction, and the
+  right baseline for differential correctness testing.
+
+`LDAPR` is only usable in a mapping that *separately* restores multi-copy atomicity; it is not a
+drop-in "cheaper LDAR." See [`docs/box64-fex-integration.md`](box64-fex-integration.md) §4 for
+the full mapping table and the special cases (`MOVNT*`, mixed-size, `REP` string ops).
 
 ## Expected win
 

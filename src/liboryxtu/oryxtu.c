@@ -25,7 +25,7 @@ static uint32_t enc_str(int rt,int rn,uint32_t imm12){ return 0xF9000000u | ((im
 static uint32_t enc_b(void)                { return 0x14000000u; }                 /* B +0 (patched)     */
 static uint32_t enc_bcond(int cond)        { return 0x54000000u | ((uint32_t)cond & 0xf); } /* B.cond +0 (patched) */
 /* --- Door 3: ordered / synchronization forms --- */
-static uint32_t enc_ldar(int rt,int rn)    { return 0xC8DFFC00u | ((uint32_t)rn<<5) | (uint32_t)rt; } /* LDAR  Xt,[Xn] (RCsc; LDAPR on FEAT_LRCPC) */
+static uint32_t enc_ldar(int rt,int rn)    { return 0xC8DFFC00u | ((uint32_t)rn<<5) | (uint32_t)rt; } /* LDAR Xt,[Xn] (RCsc: correct-but-SC conservative; NOT bare LDAPR — RCpc is weaker than TSO) */
 static uint32_t enc_stlr(int rt,int rn)    { return 0xC89FFC00u | ((uint32_t)rn<<5) | (uint32_t)rt; } /* STLR  Xt,[Xn] */
 static uint32_t enc_add_imm(int rd,int rn,uint32_t imm12){ return 0x91000000u | ((imm12&0xfffu)<<10) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* ADD Xd,Xn,#imm */
 static uint32_t enc_ldaddal(int rs,int rt,int rn){ return 0xF8E00000u | ((uint32_t)rs<<16) | ((uint32_t)rn<<5) | (uint32_t)rt; } /* LDADDAL Xs,Xt,[Xn] */
