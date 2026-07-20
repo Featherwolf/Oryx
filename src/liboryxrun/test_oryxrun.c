@@ -190,6 +190,101 @@ static void test_flags_and_fence(void)
 	CHECK(g.regs[GR_RAX] == 0x7, "RAX preserved across DMB");
 }
 
+/* ---- multi-block dispatcher tests --------------------------------------- */
+
+/* Guest program: a countdown loop that sums the counter.
+ *   0x1000 (loop): RAX += RCX ; RCX -= RBX ; CMP RCX,RDX ; BR NE -> 0x1000 (else 0x2000)
+ *   0x2000 (exit): RET
+ * With RAX=0,RCX=5,RBX=1,RDX=0 -> RAX = 5+4+3+2+1 = 15, exits when RCX hits 0. */
+static int fetch_sumloop(uint64_t pc, struct oryx_ginsn *ops, size_t cap,
+			 size_t *n, uint32_t *len, void *ctx)
+{
+	(void)ctx;
+	if (cap < 4) return ORYX_ERR_INVAL;
+	if (pc == 0x1000) {
+		size_t k = 0;
+		ops[k++] = I(GOP_ADD_RR, GR_RAX, GR_RCX, 0);   /* sum += counter   */
+		ops[k++] = I(GOP_SUB_RR, GR_RCX, GR_RBX, 0);   /* counter -= 1     */
+		ops[k++] = I(GOP_CMP_RR, GR_RCX, GR_RDX, 0);   /* flags = RCX - 0  */
+		ops[k++] = (struct oryx_ginsn){ .op = GOP_BR, .cc = GCC_NE, .target = 0x1000 };
+		*n = k; *len = 0x1000;                         /* fall-through = 0x2000 */
+		return ORYX_OK;
+	}
+	if (pc == 0x2000) {
+		ops[0] = I(GOP_RET, 0, 0, 0);
+		*n = 1; *len = 4;
+		return ORYX_OK;
+	}
+	return ORYX_ERR_NOTFOUND;
+}
+
+/* Guest program: an unconditional JMP chain. 0x100 -> 0x200 -> 0x300 (RET). */
+static int fetch_jmpchain(uint64_t pc, struct oryx_ginsn *ops, size_t cap,
+			  size_t *n, uint32_t *len, void *ctx)
+{
+	(void)ctx; (void)cap;
+	if (pc == 0x100) {
+		ops[0] = I(GOP_MOV_RI, GR_RAX, 0, 42);
+		ops[1] = (struct oryx_ginsn){ .op = GOP_JMP, .target = 0x200 };
+		*n = 2; *len = 8; return ORYX_OK;
+	}
+	if (pc == 0x200) {
+		ops[0] = I(GOP_ADD_RR, GR_RAX, GR_RAX, 0);     /* RAX += RAX -> 84 */
+		ops[1] = (struct oryx_ginsn){ .op = GOP_JMP, .target = 0x300 };
+		*n = 2; *len = 8; return ORYX_OK;
+	}
+	if (pc == 0x300) {
+		ops[0] = I(GOP_RET, 0, 0, 0);
+		*n = 1; *len = 4; return ORYX_OK;
+	}
+	return ORYX_ERR_NOTFOUND;
+}
+
+static void test_dispatcher(void)
+{
+	printf("test: multi-block dispatcher (loop + conditional, JMP chain)\n");
+	/* Loop with a conditional branch. */
+	{
+		struct oryx_guest g = {0};
+		g.regs[GR_RAX] = 0; g.regs[GR_RCX] = 5; g.regs[GR_RBX] = 1; g.regs[GR_RDX] = 0;
+		uint64_t steps = 0;
+		int rc = oryx_run_program(fetch_sumloop, NULL, ORYX_POLICY_DRF, ORYX_ORDER_SC,
+					  0x1000, &g, 1000, &steps);
+		CHECK(rc == ORYX_OK, "sum-loop ran to halt");
+		CHECK(g.regs[GR_RAX] == 15, "RAX = 5+4+3+2+1 = 15 (loop ran 5x)");
+		CHECK(g.regs[GR_RCX] == 0, "counter reached 0");
+		CHECK(steps == 6, "6 blocks executed (5 loop bodies + exit)");
+	}
+	/* Unconditional JMP chain across three blocks. */
+	{
+		struct oryx_guest g = {0};
+		uint64_t steps = 0;
+		int rc = oryx_run_program(fetch_jmpchain, NULL, ORYX_POLICY_DRF, ORYX_ORDER_SC,
+					  0x100, &g, 1000, &steps);
+		CHECK(rc == ORYX_OK, "jmp-chain ran to halt");
+		CHECK(g.regs[GR_RAX] == 84, "RAX = 42 then doubled = 84");
+		CHECK(steps == 3, "3 blocks executed (0x100 -> 0x200 -> 0x300)");
+	}
+	/* Runaway guard: an infinite loop must be stopped by max_steps. */
+	{
+		struct oryx_guest g = {0};
+		g.regs[GR_RAX] = 0; g.regs[GR_RCX] = 1; g.regs[GR_RBX] = 0; g.regs[GR_RDX] = 0;
+		/* RBX=0 so RCX never decrements -> CMP RCX,0 stays NE -> infinite loop. */
+		uint64_t steps = 0;
+		int rc = oryx_run_program(fetch_sumloop, NULL, ORYX_POLICY_DRF, ORYX_ORDER_SC,
+					  0x1000, &g, 50, &steps);
+		CHECK(rc == ORYX_ERR_INVAL, "runaway loop stopped by max_steps");
+		CHECK(steps == 50, "stopped exactly at the step cap");
+	}
+	/* Missing block: fetch returns NOTFOUND -> program stops with that error. */
+	{
+		struct oryx_guest g = {0};
+		int rc = oryx_run_program(fetch_jmpchain, NULL, ORYX_POLICY_DRF, ORYX_ORDER_SC,
+					  0x999, &g, 1000, NULL);
+		CHECK(rc == ORYX_ERR_NOTFOUND, "unknown entry PC -> NOTFOUND");
+	}
+}
+
 int main(void)
 {
 	if (!oryx_run_supported()) {
@@ -217,6 +312,7 @@ int main(void)
 	test_memory_paths();
 	test_atomics();
 	test_flags_and_fence();
+	test_dispatcher();
 	printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;
 }

@@ -91,6 +91,58 @@ int  oryx_run(const struct oryx_tu *tu, struct oryx_guest *g);
 /* True if this build can actually execute AArch64 blocks (i.e. host is AArch64). */
 int  oryx_run_supported(void);
 
+/* ---- multi-block control-flow dispatch --------------------------------------
+ *
+ * Runs a whole guest PROGRAM, not one block: translate the block at the current
+ * guest PC, execute it, take the successor PC it reports, and repeat — a lazy
+ * translate-on-demand dispatcher with a block cache. Branches, conditionals, and
+ * loops all work because a control-flow block reports which successor it took.
+ *
+ * Mechanism (return-to-dispatcher, no inter-block chaining): oryx_exec_map_linked
+ * appends small "exit stubs" after a block's body; each terminator branch is
+ * repointed to the stub for its target, and the stub loads that target guest PC
+ * into x17 and RETs to the dispatcher. A block that ends in guest RET writes no
+ * x17 and so reports ORYX_HALT_PC, stopping the program. (Guest CALL/RET with a
+ * real return stack is not modelled yet: RET means "program done".)
+ */
+
+/* Successor-PC sentinel meaning "stop": a guest RET reports this. ~0 is reserved
+ * as a guest PC target for this reason. */
+#define ORYX_HALT_PC  ((uint64_t)~0ull)
+
+/* Max guest ops the dispatcher will fetch per block. */
+#define ORYX_MAX_BLOCK_OPS 64
+
+/*
+ * Fetch the guest IR for the basic block at `pc`. Fill `ops` (capacity `cap`),
+ * set `*n` (op count) and `*len` (guest bytes covered). Return ORYX_OK, or an
+ * ORYX_ERR_* (e.g. ORYX_ERR_NOTFOUND) if there is no block at `pc` — which stops
+ * the program with that error. `ctx` is the opaque pointer passed to
+ * oryx_run_program.
+ */
+typedef int (*oryx_fetch_fn)(uint64_t pc, struct oryx_ginsn *ops, size_t cap,
+			     size_t *n, uint32_t *len, void *ctx);
+
+/*
+ * Map a block executable AND link its control flow: append exit stubs and
+ * repoint the terminator branch(es) at them. Accepts blocks ending in RET (no
+ * stubs), JMP (one stub), or BR (two stubs — taken + fall-through). Same error
+ * contract as oryx_exec_map, plus ORYX_ERR_INVAL for >1 relocation.
+ */
+int  oryx_exec_map_linked(const struct oryx_tu *tu, struct oryx_exec *out);
+
+/*
+ * Run the program starting at `entry_pc` against guest state `g`, using `fetch`
+ * to obtain IR on demand and translating with (policy, strength). Stops when a
+ * block reports ORYX_HALT_PC (guest RET), or fails if a block runs longer than
+ * `max_steps` (0 = a built-in default runaway guard). `*steps_out` (nullable)
+ * receives the number of blocks executed. AArch64 only.
+ */
+int  oryx_run_program(oryx_fetch_fn fetch, void *ctx,
+		      enum oryx_mm_policy policy, enum oryx_order_strength strength,
+		      uint64_t entry_pc, struct oryx_guest *g,
+		      uint64_t max_steps, uint64_t *steps_out);
+
 #ifdef __cplusplus
 }
 #endif
