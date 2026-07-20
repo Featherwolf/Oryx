@@ -47,6 +47,29 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stdint.h>
+#include <errno.h>
+#include <sys/prctl.h>
+
+/*
+ * No-root hardware-TSO request path.
+ *
+ * If the running kernel implements a memory-model prctl (the ARM-Linux
+ * "PR_SET_MEM_MODEL" interface, as on Asahi), an UNPRIVILEGED thread can ask the
+ * kernel to switch it into hardware TSO — no root needed. These values mirror
+ * that proposed interface; if a kernel ships different numbers, match them here.
+ * On kernels without the feature the call simply returns -1/EINVAL and we fall
+ * back to measuring the plain weak baseline.
+ */
+#ifndef PR_GET_MEM_MODEL
+#define PR_GET_MEM_MODEL 0x6d4d444c
+#define PR_SET_MEM_MODEL 0x6d4d444d
+#endif
+#ifndef PR_MEM_MODEL_DEFAULT
+#define PR_MEM_MODEL_DEFAULT 0
+#endif
+#ifndef PR_MEM_MODEL_TSO
+#define PR_MEM_MODEL_TSO 1
+#endif
 
 #define CACHELINE 128
 
@@ -71,7 +94,18 @@ static int  g_fenced = 0;
 static int  g_cpu_a  = 0;
 static int  g_cpu_b  = 1;
 static int  g_json   = 0;
+static int  g_request_tso = 0;     /* ask the kernel for hardware TSO (no root) */
 static enum test_kind g_test = TEST_MP;
+
+/* Per-thread: try to enter hardware TSO via the kernel. Returns 0 on success. */
+static atomic_int g_tso_granted = 0;   /* count of threads the kernel put in TSO mode */
+static int try_request_tso(void)
+{
+	int rc = prctl(PR_SET_MEM_MODEL, PR_MEM_MODEL_TSO, 0, 0, 0);
+	if (rc == 0)
+		atomic_fetch_add_explicit(&g_tso_granted, 1, memory_order_relaxed);
+	return rc;
+}
 
 static void pin_to_cpu(int cpu)
 {
@@ -102,6 +136,7 @@ static void *thread0(void *arg)
 {
     (void)arg;
     pin_to_cpu(g_cpu_a);
+    if (g_request_tso) try_request_tso();
     for (long i = 1; i <= g_iters; i++) {
         wait_gate(&S->gate_go, i);
         if (g_test == TEST_MP) {
@@ -124,6 +159,7 @@ static void *thread1(void *arg)
 {
     (void)arg;
     pin_to_cpu(g_cpu_b);
+    if (g_request_tso) try_request_tso();
     for (long i = 1; i <= g_iters; i++) {
         wait_gate(&S->gate_go, i);
         if (g_test == TEST_MP) {
@@ -161,10 +197,12 @@ static void parse_args(int argc, char **argv)
             g_cpu_b = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--json")) {
             g_json = 1;
+        } else if (!strcmp(argv[i], "--request-tso")) {
+            g_request_tso = 1;
         } else {
             fprintf(stderr,
                 "usage: %s [--test mp|sb] [--mode relaxed|fenced] [--iters N] "
-                "[--cpu-a A] [--cpu-b B] [--json]\n", argv[0]);
+                "[--cpu-a A] [--cpu-b B] [--json] [--request-tso]\n", argv[0]);
             exit(2);
         }
     }
@@ -214,14 +252,25 @@ int main(int argc, char **argv)
 
     const char *tname = (g_test == TEST_MP) ? "mp" : "sb";
     const char *mname = g_fenced ? "fenced" : "relaxed";
+    int tso_granted = atomic_load_explicit(&g_tso_granted, memory_order_relaxed);
 
     if (g_json) {
         printf("{\"test\":\"%s\",\"mode\":\"%s\",\"iters\":%ld,\"cpu_a\":%d,"
-               "\"cpu_b\":%d,\"witnesses\":%ld,\"total\":%ld}\n",
-               tname, mname, g_iters, g_cpu_a, g_cpu_b, witnesses, total);
+               "\"cpu_b\":%d,\"witnesses\":%ld,\"total\":%ld,"
+               "\"tso_requested\":%d,\"tso_granted\":%d}\n",
+               tname, mname, g_iters, g_cpu_a, g_cpu_b, witnesses, total,
+               g_request_tso, tso_granted);
     } else {
         printf("test=%s mode=%s iters=%ld cpu-a=%d cpu-b=%d\n",
                tname, mname, g_iters, g_cpu_a, g_cpu_b);
+        if (g_request_tso) {
+            if (tso_granted == 2)
+                printf("  hardware TSO: GRANTED by kernel to both threads (NO ROOT) -- "
+                       "if MP witnesses are now 0, this phone can do it unrooted!\n");
+            else
+                printf("  hardware TSO: request DENIED (kernel has no memory-model prctl; "
+                       "granted=%d/2). Measuring plain weak baseline.\n", tso_granted);
+        }
         printf("  witnesses = %ld / %ld  (%.3e)\n",
                witnesses, total, total ? (double)witnesses / (double)total : 0.0);
         if (g_test == TEST_MP)

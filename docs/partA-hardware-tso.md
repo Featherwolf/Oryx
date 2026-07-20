@@ -7,6 +7,13 @@ separates on-device JIT from Rosetta.
 **Confidence:** hardware exists **[Established]**; per-thread Android toggle **[R&D]** →
 gated on [Phase 0](../experiments/phase0-tso-probe/).
 
+> **Without rooting the user's phone?** Writing the TSO bit is an EL1 (kernel) operation —
+> no unprivileged app can do it. The no-root paths are: (1) the kernel exposing a
+> `PR_SET_MEM_MODEL` prctl (testable today with `oryx_litmus --request-tso`), (2) getting that
+> prctl upstream so retail builds ship it (the Apple/Windows model), or (3) erasing most of the
+> fence tax in software via data-race-free-aware translation. Full analysis:
+> [`docs/unrooted-paths.md`](unrooted-paths.md).
+
 ## Precedent we are copying
 
 | System | Mechanism |
