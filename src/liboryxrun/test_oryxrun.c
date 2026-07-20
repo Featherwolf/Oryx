@@ -218,6 +218,23 @@ static int fetch_sumloop(uint64_t pc, struct oryx_ginsn *ops, size_t cap,
 	return ORYX_ERR_NOTFOUND;
 }
 
+/* Guest program: a 40-block chain, each block RAX += RCX then JMP next; block 40
+ * is RET. Exercises the hash-table block cache across many distinct guest PCs. */
+#define LC_BASE 0x10000ull
+#define LC_N    40u
+static int fetch_longchain(uint64_t pc, struct oryx_ginsn *ops, size_t cap,
+			   size_t *n, uint32_t *len, void *ctx)
+{
+	(void)ctx; (void)cap;
+	if (pc >= LC_BASE && pc < LC_BASE + LC_N * 0x100ull && ((pc - LC_BASE) % 0x100ull) == 0) {
+		ops[0] = I(GOP_ADD_RR, GR_RAX, GR_RCX, 0);                       /* RAX += 1 */
+		ops[1] = (struct oryx_ginsn){ .op = GOP_JMP, .target = pc + 0x100ull };
+		*n = 2; *len = 0x100; return ORYX_OK;
+	}
+	if (pc == LC_BASE + LC_N * 0x100ull) { ops[0] = I(GOP_RET, 0, 0, 0); *n = 1; *len = 4; return ORYX_OK; }
+	return ORYX_ERR_NOTFOUND;
+}
+
 /* Guest program: an unconditional JMP chain. 0x100 -> 0x200 -> 0x300 (RET). */
 static int fetch_jmpchain(uint64_t pc, struct oryx_ginsn *ops, size_t cap,
 			  size_t *n, uint32_t *len, void *ctx)
@@ -273,7 +290,7 @@ static void test_dispatcher(void)
 		uint64_t steps = 0;
 		int rc = oryx_run_program(fetch_sumloop, NULL, ORYX_POLICY_DRF, ORYX_ORDER_SC,
 					  0x1000, &g, 50, &steps);
-		CHECK(rc == ORYX_ERR_INVAL, "runaway loop stopped by max_steps");
+		CHECK(rc == ORYX_ERR_STEPS, "runaway loop stopped by max_steps (distinct code)");
 		CHECK(steps == 50, "stopped exactly at the step cap");
 	}
 	/* Missing block: fetch returns NOTFOUND -> program stops with that error. */
@@ -282,6 +299,17 @@ static void test_dispatcher(void)
 		int rc = oryx_run_program(fetch_jmpchain, NULL, ORYX_POLICY_DRF, ORYX_ORDER_SC,
 					  0x999, &g, 1000, NULL);
 		CHECK(rc == ORYX_ERR_NOTFOUND, "unknown entry PC -> NOTFOUND");
+	}
+	/* 40-block chain: many distinct guest PCs through the hash cache. */
+	{
+		struct oryx_guest g = {0};
+		g.regs[GR_RAX] = 0; g.regs[GR_RCX] = 1;
+		uint64_t steps = 0;
+		int rc = oryx_run_program(fetch_longchain, NULL, ORYX_POLICY_DRF, ORYX_ORDER_SC,
+					  LC_BASE, &g, 1000, &steps);
+		CHECK(rc == ORYX_OK, "40-block chain ran to halt");
+		CHECK(g.regs[GR_RAX] == LC_N, "RAX incremented once per block = 40");
+		CHECK(steps == LC_N + 1, "41 blocks executed (40 + RET)");
 	}
 }
 

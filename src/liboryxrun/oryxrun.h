@@ -17,14 +17,17 @@
  * and the block reads/writes that memory. Multi-block control-flow dispatch
  * (resolving branch relocations, a guest-PC->host-block map) is the next build.
  *
- * Address-space caveat: because guest and host addresses are identified, the
- * runtime's OWN writable state — in particular the struct oryx_guest register
- * file passed to oryx_exec_run — is guest-reachable. Guest code that computes a
- * base address aliasing that register file would observe/clobber it mid-run
- * (the trampoline holds x0..x15 in CPU registers across the block, so a store
- * into regs[] does not take effect until after RET). Callers must keep guest
- * memory disjoint from the oryx_guest they pass in. A real VM gives the guest a
- * separate address window; this identity-mapped reference runtime does not.
+ * Address-space caveat: because guest and host addresses are identified, ALL of
+ * the runtime's own host allocations are guest-reachable — a guest LOAD/STORE
+ * whose base aliases them observes/clobbers runtime state. This includes: the
+ * struct oryx_guest register file (held in CPU registers across a block, so a
+ * store into regs[] lands only after RET); the dispatcher's block cache (which
+ * holds host code pointers the dispatcher BLRs into — corrupting one escalates
+ * from data clobber to control-flow hijack); and the PROT_READ|EXEC code pages
+ * (a store there faults). The register file the caller can keep disjoint; the
+ * cache and code pages live at runtime-chosen addresses the caller cannot
+ * predict. A real VM gives the guest a separate address window; this identity-
+ * mapped reference runtime does not, so it is for trusted guest code only.
  *
  * Executing AArch64 requires an AArch64 host (real device, or this repo's tests
  * under qemu-aarch64). On any other arch the map/run calls return
@@ -61,6 +64,9 @@ struct oryx_exec {
 #endif
 #ifndef ORYX_ERR_PERM
 #define ORYX_ERR_PERM        (-101)   /* exec mapping denied by W^X/SELinux policy */
+#endif
+#ifndef ORYX_ERR_STEPS
+#define ORYX_ERR_STEPS       (-102)   /* oryx_run_program hit its max_steps guard  */
 #endif
 
 /*
@@ -134,9 +140,13 @@ int  oryx_exec_map_linked(const struct oryx_tu *tu, struct oryx_exec *out);
 /*
  * Run the program starting at `entry_pc` against guest state `g`, using `fetch`
  * to obtain IR on demand and translating with (policy, strength). Stops when a
- * block reports ORYX_HALT_PC (guest RET), or fails if a block runs longer than
- * `max_steps` (0 = a built-in default runaway guard). `*steps_out` (nullable)
- * receives the number of blocks executed. AArch64 only.
+ * block reports ORYX_HALT_PC (guest RET); returns ORYX_ERR_STEPS if it runs
+ * longer than `max_steps` (0 = a built-in default runaway guard), or ORYX_ERR_*
+ * from fetch/translate/map. `*steps_out` (nullable) receives the number of
+ * blocks executed. Translated blocks are cached in a bounded hash table; when
+ * the cache fills it is flushed wholesale (blocks retranslate on next use), so
+ * live executable memory stays bounded regardless of how many distinct guest
+ * PCs the program reaches. AArch64 only.
  */
 int  oryx_run_program(oryx_fetch_fn fetch, void *ctx,
 		      enum oryx_mm_policy policy, enum oryx_order_strength strength,

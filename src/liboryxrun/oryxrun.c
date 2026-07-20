@@ -227,10 +227,48 @@ int oryx_exec_run(const struct oryx_exec *e, struct oryx_guest *g)
 	return ORYX_OK;
 }
 
+/* Block cache: fixed-size open-addressing hash table keyed by guest PC, so the
+ * per-step lookup is O(1) and live executable memory is bounded. When it fills
+ * past the load-factor cap it is flushed wholesale (blocks retranslate on next
+ * use) — simple and always correct, bounding total mapped code pages. */
+#define ORYX_CACHE_SLOTS 16384u          /* power of two */
+#define ORYX_CACHE_CAP   12288u          /* ~0.75 load factor -> flush          */
+struct oryx_centry { uint64_t pc; struct oryx_exec e; uint8_t used; };
+
+static uint64_t oryx_pc_hash(uint64_t pc)
+{ pc *= 0x9E3779B97F4A7C15ull; return pc ^ (pc >> 29); }
+
+static struct oryx_centry *oryx_cache_find(struct oryx_centry *t, uint64_t pc)
+{
+	uint64_t i = oryx_pc_hash(pc) & (ORYX_CACHE_SLOTS - 1);
+	for (unsigned p = 0; p < ORYX_CACHE_SLOTS; p++) {
+		struct oryx_centry *c = &t[i];
+		if (!c->used) return NULL;               /* empty slot -> miss */
+		if (c->pc == pc) return c;               /* hit */
+		i = (i + 1) & (ORYX_CACHE_SLOTS - 1);
+	}
+	return NULL;
+}
+
+static struct oryx_centry *oryx_cache_insert(struct oryx_centry *t, uint64_t pc)
+{
+	uint64_t i = oryx_pc_hash(pc) & (ORYX_CACHE_SLOTS - 1);
+	for (unsigned p = 0; p < ORYX_CACHE_SLOTS; p++) {
+		struct oryx_centry *c = &t[i];
+		if (!c->used) { c->used = 1; c->pc = pc; return c; }
+		i = (i + 1) & (ORYX_CACHE_SLOTS - 1);
+	}
+	return NULL;                                     /* full (guarded by CAP flush) */
+}
+
+static void oryx_cache_flush(struct oryx_centry *t)
+{
+	for (unsigned i = 0; i < ORYX_CACHE_SLOTS; i++)
+		if (t[i].used) { oryx_exec_free(&t[i].e); t[i].used = 0; }
+}
+
 /* The dispatcher: lazily translate+link+cache the block at each guest PC, run
  * it, follow the successor PC it reports, until a block reports ORYX_HALT_PC. */
-struct oryx_centry { uint64_t pc; struct oryx_exec e; };
-
 int oryx_run_program(oryx_fetch_fn fetch, void *ctx,
 		     enum oryx_mm_policy pol, enum oryx_order_strength str,
 		     uint64_t entry_pc, struct oryx_guest *g,
@@ -241,23 +279,23 @@ int oryx_run_program(oryx_fetch_fn fetch, void *ctx,
 	if (max_steps == 0)
 		max_steps = 10000000ull;             /* runaway guard default */
 
-	struct oryx_centry *cache = NULL;
-	size_t ncache = 0, ccache = 0;
+	struct oryx_centry *cache = calloc(ORYX_CACHE_SLOTS, sizeof(*cache));
+	if (!cache)
+		return ORYX_ERR_NOMEM;
+	unsigned live = 0;
 	uint64_t pc = entry_pc, steps = 0;
 	int rc = ORYX_OK;
 
 	while (pc != ORYX_HALT_PC) {
-		if (steps >= max_steps) { rc = ORYX_ERR_INVAL; break; }
+		if (steps >= max_steps) { rc = ORYX_ERR_STEPS; break; }
 
-		void *code = NULL;
-		for (size_t i = 0; i < ncache; i++)
-			if (cache[i].pc == pc) { code = cache[i].e.code; break; }
-
-		if (!code) {
+		struct oryx_centry *ent = oryx_cache_find(cache, pc);
+		if (!ent) {
 			struct oryx_ginsn ops[ORYX_MAX_BLOCK_OPS];
 			size_t n = 0; uint32_t len = 0;
 			rc = fetch(pc, ops, ORYX_MAX_BLOCK_OPS, &n, &len, ctx);
 			if (rc != ORYX_OK) break;
+			if (n == 0 || n > ORYX_MAX_BLOCK_OPS) { rc = ORYX_ERR_FORMAT; break; }
 			struct oryx_tu tu;
 			rc = oryx_translate_ex(ops, n, pc, len, 0, pol, str, &tu, NULL);
 			if (rc != ORYX_OK) break;
@@ -265,22 +303,21 @@ int oryx_run_program(oryx_fetch_fn fetch, void *ctx,
 			rc = oryx_exec_map_linked(&tu, &e);
 			oryx_tu_free(&tu);
 			if (rc != ORYX_OK) break;
-			if (ncache == ccache) {
-				size_t nc = ccache ? ccache * 2 : 8;
-				struct oryx_centry *nn = realloc(cache, nc * sizeof(*nn));
-				if (!nn) { oryx_exec_free(&e); rc = ORYX_ERR_NOMEM; break; }
-				cache = nn; ccache = nc;
+			if (live >= ORYX_CACHE_CAP) {         /* bound live code pages */
+				oryx_cache_flush(cache);
+				live = 0;
 			}
-			cache[ncache].pc = pc; cache[ncache].e = e; ncache++;
-			code = e.code;                       /* stable mmap base */
+			ent = oryx_cache_insert(cache, pc);
+			if (!ent) { oryx_exec_free(&e); rc = ORYX_ERR_NOMEM; break; }
+			ent->e = e;
+			live++;
 		}
 
-		pc = oryx_tramp(g->regs, code);
+		pc = oryx_tramp(g->regs, ent->e.code);
 		steps++;
 	}
 
-	for (size_t i = 0; i < ncache; i++)
-		oryx_exec_free(&cache[i].e);
+	oryx_cache_flush(cache);
 	free(cache);
 	if (steps_out) *steps_out = steps;
 	return rc;

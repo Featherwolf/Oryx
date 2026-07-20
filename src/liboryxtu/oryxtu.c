@@ -117,6 +117,8 @@ int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 {
 	if (!ops || !out)
 		return ORYX_ERR_INVAL;
+	if (n == 0 || n > (1u << 20))     /* sanity ceiling: no real block is this big */
+		return ORYX_ERR_INVAL;
 
 	struct buf code = {0};
 	struct oryx_reloc *relocs = NULL; uint32_t nreloc = 0, creloc = 0;
