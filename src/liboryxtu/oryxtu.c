@@ -15,8 +15,7 @@
 /* ---- AArch64 encoders (return the 32-bit instruction word) --------------- */
 static uint32_t enc_ret(void)              { return 0xD65F03C0u; }                 /* RET x30            */
 static uint32_t enc_mov_rr(int rd, int rm) { return 0xAA0003E0u | ((uint32_t)rm<<16) | (uint32_t)rd; } /* ORR Xd,XZR,Xm */
-static uint32_t enc_add_rr(int rd,int rn,int rm){ return 0x8B000000u | ((uint32_t)rm<<16) | ((uint32_t)rn<<5) | (uint32_t)rd; }
-static uint32_t enc_sub_rr(int rd,int rn,int rm){ return 0xCB000000u | ((uint32_t)rm<<16) | ((uint32_t)rn<<5) | (uint32_t)rd; }
+static uint32_t enc_add_rr(int rd,int rn,int rm){ return 0x8B000000u | ((uint32_t)rm<<16) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* ADD (non-flag; LEA materialize) */
 static uint32_t enc_subs_cmp(int rn,int rm){ return 0xEB000000u | ((uint32_t)rm<<16) | ((uint32_t)rn<<5) | 31u; } /* SUBS XZR,Xn,Xm */
 static uint32_t enc_movz(int rd,uint32_t imm16,int hw){ return 0xD2800000u | ((uint32_t)hw<<21) | ((imm16&0xffffu)<<5) | (uint32_t)rd; }
 static uint32_t enc_movk(int rd,uint32_t imm16,int hw){ return 0xF2800000u | ((uint32_t)hw<<21) | ((imm16&0xffffu)<<5) | (uint32_t)rd; }
