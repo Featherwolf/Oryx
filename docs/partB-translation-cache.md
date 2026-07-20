@@ -28,7 +28,10 @@ deterministic nor portable. To make output cacheable we need each translation un
   relocation table resolved at map time.
 - **Deterministic:** identical inputs ⇒ identical bytes. Requires pinning register allocation,
   constant pools, and any RNG/address-dependent codegen. (This is the hard part; it is a
-  known-tractable compiler problem, not research.)
+  known-tractable compiler problem, not research.) The contract, the Box64 non-determinism
+  sources + fixes, and the conformance gate are specified in
+  [`docs/partB-determinism.md`](partB-determinism.md); a working, tested reference translator
+  that satisfies it is [`src/liboryxtu`](../src/liboryxtu/).
 - **Self-describing:** carries its guest entry PC, guest byte range, relocation table,
   and the exit edges (direct/indirect) so the runtime can stitch TUs together.
 
