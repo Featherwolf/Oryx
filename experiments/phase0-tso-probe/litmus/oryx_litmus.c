@@ -79,20 +79,32 @@ typedef struct {
     _Alignas(CACHELINE) atomic_int y;
     _Alignas(CACHELINE) atomic_int t0_a;   /* T0's observed load (SB) */
     atomic_int t0_b;
-    _Alignas(CACHELINE) atomic_int t1_a;   /* T1's observed load(s) (MP/SB) */
+    _Alignas(CACHELINE) atomic_int t1_a;   /* T1's observed load(s) (MP/SB/WRC r1) */
     atomic_int t1_b;
+    _Alignas(CACHELINE) atomic_int t2_a;   /* T2's observed loads (WRC r2, r3) */
+    atomic_int t2_b;
     _Alignas(CACHELINE) atomic_long gate_go;
     _Alignas(CACHELINE) atomic_long t0_done;
     _Alignas(CACHELINE) atomic_long t1_done;
+    _Alignas(CACHELINE) atomic_long t2_done;
 } shared_t;
 
-enum test_kind { TEST_MP, TEST_SB };
+/* MP/SB are 2-thread; WRC is 3-thread and probes MULTI-COPY ATOMICITY:
+ *   T0: x=1        T1: r1=x; y=1        T2: r2=y; r3=x
+ *   witness = r1==1 && r2==1 && r3==0  ("T1 saw x and published y; T2 saw y but
+ *   not x" — a non-multi-copy-atomic / non-transitive observation).
+ * FORBIDDEN under x86-TSO (MCA). On ARM it is forbidden ONLY if the reader loads
+ * are ordered AND write-atomicity holds — so it is the decisive test for whether
+ * LDAPR/STLR (rcpc) preserves MCA (the open question the 2-thread SB test cannot
+ * answer). plain (no ordering) fires it on weak ARM = the sensitivity control. */
+enum test_kind { TEST_MP, TEST_SB, TEST_WRC };
 
 static shared_t *S;
 static long g_iters  = 5000000L;   /* mobile-friendly default; raise for more sensitivity */
 static int  g_fenced = 0;
 static int  g_cpu_a  = 0;
 static int  g_cpu_b  = 1;
+static int  g_cpu_c  = 2;           /* third core, WRC only */
 static int  g_json   = 0;
 static int  g_request_tso = 0;     /* ask the kernel for hardware TSO (no root) */
 static enum test_kind g_test = TEST_MP;
@@ -220,6 +232,8 @@ static void *thread0(void *arg)
             map_store(&S->x, 1);
             if (g_map == MAP_PLAIN && g_fenced) barrier_full();
             map_store(&S->y, 1);
+        } else if (g_test == TEST_WRC) {   /* T0: x=1 */
+            map_store(&S->x, 1);
         } else { /* SB */
             map_store(&S->x, 1);
             if (g_map == MAP_PLAIN && g_fenced) barrier_full();
@@ -245,6 +259,10 @@ static void *thread1(void *arg)
             int r2 = map_load(&S->x);
             atomic_store_explicit(&S->t1_a, r1, memory_order_relaxed);
             atomic_store_explicit(&S->t1_b, r2, memory_order_relaxed);
+        } else if (g_test == TEST_WRC) {   /* T1: r1=x; y=1 (load ordered before store) */
+            int r1 = map_load(&S->x);
+            atomic_store_explicit(&S->t1_a, r1, memory_order_relaxed);
+            map_store(&S->y, 1);
         } else { /* SB */
             map_store(&S->y, 1);
             if (g_map == MAP_PLAIN && g_fenced) barrier_full();
@@ -256,14 +274,32 @@ static void *thread1(void *arg)
     return NULL;
 }
 
+/* Thread 2 (WRC reader only). r2=y; r3=x. Witness needs r2==1 && r3==0. */
+static void *thread2(void *arg)
+{
+    (void)arg;
+    pin_to_cpu(g_cpu_c);
+    if (g_request_tso) try_request_tso();
+    for (long i = 1; i <= g_iters; i++) {
+        wait_gate(&S->gate_go, i);
+        int r2 = map_load(&S->y);
+        int r3 = map_load(&S->x);
+        atomic_store_explicit(&S->t2_a, r2, memory_order_relaxed);
+        atomic_store_explicit(&S->t2_b, r3, memory_order_relaxed);
+        atomic_store_explicit(&S->t2_done, i, memory_order_release);
+    }
+    return NULL;
+}
+
 static void parse_args(int argc, char **argv)
 {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--test") && i + 1 < argc) {
             const char *t = argv[++i];
-            if      (!strcmp(t, "mp")) g_test = TEST_MP;
-            else if (!strcmp(t, "sb")) g_test = TEST_SB;
-            else { fprintf(stderr, "unknown --test %s (mp|sb)\n", t); exit(2); }
+            if      (!strcmp(t, "mp"))  g_test = TEST_MP;
+            else if (!strcmp(t, "sb"))  g_test = TEST_SB;
+            else if (!strcmp(t, "wrc")) g_test = TEST_WRC;
+            else { fprintf(stderr, "unknown --test %s (mp|sb|wrc)\n", t); exit(2); }
         } else if (!strcmp(argv[i], "--mode") && i + 1 < argc) {
             g_fenced = !strcmp(argv[++i], "fenced");
         } else if (!strcmp(argv[i], "--map") && i + 1 < argc) {
@@ -279,15 +315,17 @@ static void parse_args(int argc, char **argv)
             g_cpu_a = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--cpu-b") && i + 1 < argc) {
             g_cpu_b = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--cpu-c") && i + 1 < argc) {
+            g_cpu_c = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--json")) {
             g_json = 1;
         } else if (!strcmp(argv[i], "--request-tso")) {
             g_request_tso = 1;
         } else {
             fprintf(stderr,
-                "usage: %s [--test mp|sb] [--mode relaxed|fenced] "
+                "usage: %s [--test mp|sb|wrc] [--mode relaxed|fenced] "
                 "[--map plain|rcpc|sc|dmb] [--iters N] "
-                "[--cpu-a A] [--cpu-b B] [--json] [--request-tso]\n", argv[0]);
+                "[--cpu-a A] [--cpu-b B] [--cpu-c C] [--json] [--request-tso]\n", argv[0]);
             exit(2);
         }
     }
@@ -302,9 +340,12 @@ int main(int argc, char **argv)
     }
     memset(S, 0, sizeof(*S));
 
-    pthread_t th0, th1;
+    int is_wrc = (g_test == TEST_WRC);
+
+    pthread_t th0, th1, th2;
     if (pthread_create(&th0, NULL, thread0, NULL) ||
-        pthread_create(&th1, NULL, thread1, NULL)) {
+        pthread_create(&th1, NULL, thread1, NULL) ||
+        (is_wrc && pthread_create(&th2, NULL, thread2, NULL))) {
         perror("pthread_create"); return 1;
     }
 
@@ -319,11 +360,17 @@ int main(int argc, char **argv)
 
         wait_gate(&S->t0_done, i);
         wait_gate(&S->t1_done, i);
+        if (is_wrc) wait_gate(&S->t2_done, i);
 
         if (g_test == TEST_MP) {
             int r1 = atomic_load_explicit(&S->t1_a, memory_order_relaxed);
             int r2 = atomic_load_explicit(&S->t1_b, memory_order_relaxed);
             if (r1 == 1 && r2 == 0) witnesses++;   /* forbidden under TSO */
+        } else if (is_wrc) {
+            int r1 = atomic_load_explicit(&S->t1_a, memory_order_relaxed); /* T1 saw x  */
+            int r2 = atomic_load_explicit(&S->t2_a, memory_order_relaxed); /* T2 saw y  */
+            int r3 = atomic_load_explicit(&S->t2_b, memory_order_relaxed); /* T2 saw x? */
+            if (r1 == 1 && r2 == 1 && r3 == 0) witnesses++;  /* non-MCA: forbidden under TSO */
         } else { /* SB */
             int r0 = atomic_load_explicit(&S->t0_a, memory_order_relaxed);
             int r1 = atomic_load_explicit(&S->t1_a, memory_order_relaxed);
@@ -334,20 +381,26 @@ int main(int argc, char **argv)
 
     pthread_join(th0, NULL);
     pthread_join(th1, NULL);
+    if (is_wrc) pthread_join(th2, NULL);
 
-    const char *tname = (g_test == TEST_MP) ? "mp" : "sb";
+    const char *tname = (g_test == TEST_MP) ? "mp" : (is_wrc ? "wrc" : "sb");
     const char *mname = g_fenced ? "fenced" : "relaxed";
     int tso_granted = atomic_load_explicit(&g_tso_granted, memory_order_relaxed);
 
     if (g_json) {
         printf("{\"test\":\"%s\",\"mode\":\"%s\",\"map\":\"%s\",\"iters\":%ld,\"cpu_a\":%d,"
-               "\"cpu_b\":%d,\"witnesses\":%ld,\"total\":%ld,"
+               "\"cpu_b\":%d,\"cpu_c\":%d,\"witnesses\":%ld,\"total\":%ld,"
                "\"tso_requested\":%d,\"tso_granted\":%d}\n",
-               tname, mname, map_name(g_map), g_iters, g_cpu_a, g_cpu_b, witnesses, total,
+               tname, mname, map_name(g_map), g_iters, g_cpu_a, g_cpu_b,
+               is_wrc ? g_cpu_c : -1, witnesses, total,
                g_request_tso, tso_granted);
     } else {
-        printf("test=%s mode=%s map=%s iters=%ld cpu-a=%d cpu-b=%d\n",
-               tname, mname, map_name(g_map), g_iters, g_cpu_a, g_cpu_b);
+        if (is_wrc)
+            printf("test=%s mode=%s map=%s iters=%ld cpu-a=%d cpu-b=%d cpu-c=%d\n",
+                   tname, mname, map_name(g_map), g_iters, g_cpu_a, g_cpu_b, g_cpu_c);
+        else
+            printf("test=%s mode=%s map=%s iters=%ld cpu-a=%d cpu-b=%d\n",
+                   tname, mname, map_name(g_map), g_iters, g_cpu_a, g_cpu_b);
         if (g_request_tso) {
             if (tso_granted == 2)
                 printf("  hardware TSO: GRANTED by kernel to both threads (NO ROOT) -- "
@@ -360,6 +413,9 @@ int main(int argc, char **argv)
                witnesses, total, total ? (double)witnesses / (double)total : 0.0);
         if (g_test == TEST_MP)
             printf("  [MP witness = r1==1 && r2==0 : forbidden under TSO, allowed under weak]\n");
+        else if (is_wrc)
+            printf("  [WRC witness = r1==1 && r2==1 && r3==0 : non-MCA, forbidden under TSO;"
+                   " plain fires it on weak ARM (sensitivity control)]\n");
         else
             printf("  [SB witness = r0==0 && r1==0 : allowed under BOTH -> sensitivity control]\n");
     }

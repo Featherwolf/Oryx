@@ -28,9 +28,14 @@ oryx_litmus: oryx_litmus.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 # Layer A — validate the x86-TSO -> AArch64 *mapping* on the device (no root).
-# Runs plain/rcpc/sc/dmb x MP/SB and prints the exact-TSO verdict.
+# Runs plain/rcpc/sc/dmb x MP/SB and prints the W->R exactness verdict.
 layerA: oryx_litmus
 	@sh run_layerA.sh
+
+# MCA gate — the 3-thread WRC test: does LDAPR/STLR keep the non-multi-copy-atomic
+# outcome forbidden? Clears (or fails) rcpc as exact-TSO. No root.
+mca: oryx_litmus
+	@sh run_mca.sh
 
 # Quick self-test: proves the binary builds and the SB control fires on the build host.
 # (On an x86 host, which is TSO, MP must be 0 and SB should be > 0.)
@@ -43,8 +48,10 @@ selftest: oryx_litmus
 	@./oryx_litmus --test mp --mode fenced --iters 2000000 --cpu-a 0 --cpu-b 1 || true
 	@echo "-- mapping variants build+run (rcpc/sc/dmb; sc-vs-rcpc SB contrast is ARM-only) --"
 	@for m in rcpc sc dmb; do ./oryx_litmus --test mp --map $$m --iters 1000000 --cpu-a 0 --cpu-b 1 --json || true; done
+	@echo "-- WRC 3-thread build+run (MCA gate; plain-fires signal is ARM-only) --"
+	@./oryx_litmus --test wrc --map rcpc --iters 1000000 --cpu-a 0 --cpu-b 1 --cpu-c 2 --json || true
 
 clean:
 	rm -f oryx_litmus
 
-.PHONY: all selftest layerA clean
+.PHONY: all selftest layerA mca clean
