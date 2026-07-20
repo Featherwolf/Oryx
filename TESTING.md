@@ -176,10 +176,44 @@ or brick a phone. Do not run it on a daily driver. See that directory's README f
 
 ---
 
+## Tier 5 — run the x86-64 translator/executor ON your phone (Termux, native) ⭐
+
+This runs the real thing on your Oryon CPU (not an emulator): it decodes actual compiled
+**x86-64 machine code**, translates it to AArch64, and **executes it natively on the phone**,
+checking the results. No root, no PC.
+
+```sh
+# in Termux on the S26 Ultra:
+pkg install git clang make
+git clone https://github.com/Featherwolf/Oryx
+cd Oryx
+make check
+```
+
+On the phone (which *is* AArch64) the `check` runs are not skipped — they build natively and
+**execute** the translated code on the Oryon cores. The lines that prove it:
+
+- `== check liboryxrun ==` → executes translated basic blocks (arithmetic, every memory-ordering
+  mapping `LDR/STR`·`STLR/LDAR`·`STLR/LDAPR`·DMB, atomics, flags, a multi-block loop dispatcher).
+- `== check liboryxdec ==` → **decodes and runs real gcc-compiled functions**: `sum_to_n` and
+  `fib`, ending with `fib(100) = 3736710778780434371` (a 64-bit overflow value — proof of exact
+  64-bit arithmetic through a real compiled conditional loop, executed on your phone).
+
+A clean run ends with `All Oryx host checks complete.` and every suite `0 failed`. That is the
+full translate→execute pipeline running on the actual target silicon.
+
+> Scope today: it runs **64-bit-integer** compiled functions (register + control-flow). Stack/
+> calls (`PUSH/POP/CALL/RET`), memory-operand data instructions, 32-bit `int` code, and syscalls
+> are the in-progress increments toward running a complete self-contained program on-device.
+
+---
+
 ## What is *not* yet runnable end-to-end
 
-Honest scope: the kernel modules (`experiments/.../probe`, `src/kmod/oryx_memmodel`) build
-against a target-device kernel but are not wired into a running Box64/FEX yet, and Part A's
-performance win is gated on the Phase 0 Step 2 result. Tiers 1–2 fully exercise the userspace
-libraries; Tier 3 runs the baseline experiment. Everything claimed as "built & tested" in the
-README is covered by Tiers 1–2.
+Honest scope: this is a reference pipeline, not yet a drop-in app runtime. The translator+decoder
+(Tier 5) execute a growing **integer subset** of x86-64 — not the full ISA, no SSE/AVX, no
+syscalls, no ELF loader yet — so it runs small compiled functions, not whole applications. The
+kernel modules (`experiments/.../probe`, `src/kmod/oryx_memmodel`) build against a target-device
+kernel but are not wired into a running Box64/FEX. Part A's hardware-TSO win is gated on the Phase
+0 Step 2 result (needs root). Tiers 1–2 exercise the userspace libraries; Tier 3 the memory-model
+baseline; Tier 4 the mapping validation; Tier 5 the on-device translate→execute pipeline.
