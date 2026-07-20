@@ -43,7 +43,7 @@ enum oryx_gop {
 	GOP_MOV_RI,      /* rd = imm                         */
 	GOP_ADD_RR,      /* rd = rd + rn                     */
 	GOP_SUB_RR,      /* rd = rd - rn                     */
-	GOP_CMP_RR,      /* flags = rn - rd (sets NZCV)      */
+	GOP_CMP_RR,      /* flags = rd - rn (x86 CMP dst,src); SUBS XZR,Xrd,Xrn */
 	GOP_LOAD,        /* rd = [rn + imm]  (imm: 0..32760, 8-aligned) */
 	GOP_STORE,       /* [rn + imm] = rd                  */
 	GOP_BR,          /* if (cc) goto target ; terminates */
@@ -84,15 +84,25 @@ struct oryx_ginsn {
 enum oryx_mm_policy { ORYX_POLICY_DRF = 0, ORYX_POLICY_CONSERVATIVE = 1 };
 
 /*
- * How an *ordered* (SHARED) access is lowered — the two correct choices
- * (docs/box64-fex-integration.md §4; bare LDAPR is unsound):
- *   SC  — LDAR/STLR (RCsc): stronger than TSO (also forbids the W->R reorder TSO
- *         allows). Correct, simplest, the safe conservative/differential baseline.
- *   TSO — the minimal exact-TSO DMB-fence scheme: load = LDR;DMB ISHLD,
- *         store = DMB ISHST;STR. Preserves exactly the W->R relaxation, and is
- *         multi-copy-atomic (unlike bare LDAPR).
+ * How an *ordered* (SHARED) access is lowered — THREE correct choices
+ * (docs/box64-fex-integration.md §4). x86-TSO = SC minus the store->load (W->R)
+ * relaxation, so the tightest correct mapping keeps R->R/R->W/W->W and relaxes
+ * only W->R:
+ *   RCPC — LDAPR(RCpc)/STLR: EXACTLY x86-TSO and cheapest (0 extra insns).
+ *          Needs FEAT_LRCPC (ARMv8.3; Oryon has it). RCpc differs from RCsc only
+ *          by dropping STLR->LDAPR ordering = the W->R/SB case TSO allows; WRC and
+ *          IRIW stay forbidden (ARMv8 is other-multi-copy-atomic). This is what
+ *          FEX uses for TSO loads. ("RCpc too weak" folklore is about seq_cst,
+ *          whose failing test is SB — which TSO permits.)
+ *   SC   — LDAR(RCsc)/STLR: STRONGER than TSO (also forbids W->R). Correct but
+ *          over-strong; works on ARMv8.0; the safe conservative/diff baseline.
+ *          NOTE: LDAR/STLR require natural alignment — a maybe-unaligned SHARED
+ *          access must use RCPC/TSO+decompose, not SC, or it will fault.
+ *   TSO  — minimal exact-TSO DMB-fence scheme: load = LDR;DMB ISHLD,
+ *          store = DMB ISHST;STR. Exact TSO, multi-copy-atomic, works pre-8.3.
+ *          (1 DMB per access here; a real translator merges adjacent fences.)
  */
-enum oryx_order_strength { ORYX_ORDER_SC = 0, ORYX_ORDER_TSO = 1 };
+enum oryx_order_strength { ORYX_ORDER_SC = 0, ORYX_ORDER_RCPC = 1, ORYX_ORDER_TSO = 2 };
 
 /* Counts of how each memory op was lowered — the barrier-reduction metric. */
 struct oryx_mm_stats {
@@ -113,8 +123,12 @@ struct oryx_mm_stats {
  * bookkeeping/prefetch). profile_id records the tuning/memory-model variant.
  * Returns ORYX_OK or an ORYX_ERR_*.
  *
- * Deterministic: for identical (ops, n, guest_pc, guest_len, profile_id) the
- * serialized TU — and therefore its content address — is byte-identical.
+ * Deterministic and collision-free: the guest hash folds in everything that
+ * affects emitted code — each op (including its mclass) plus guest_pc, the
+ * memory-model policy, and the ordering strength — so two translations produce
+ * the same content address iff they would produce the same host bytes. (This
+ * closes a cache-aliasing bug where blocks differing only in mclass/policy/
+ * strength shared a key.)
  */
 int oryx_translate(const struct oryx_ginsn *ops, size_t n,
 		   uint64_t guest_pc, uint32_t guest_len, uint32_t profile_id,

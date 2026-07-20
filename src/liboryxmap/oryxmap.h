@@ -40,9 +40,18 @@ enum oryx_mclass4 {
 	OMC_ATOMIC  = 3,   /* synchronization -> emit the atomic, never relax      */
 };
 
-/* Per-entry flags. */
-#define OMC_EF_GUARD_REQUIRED (1u << 0) /* LOCAL relaxes only if a runtime guard confirms it */
-#define OMC_EF_ESCAPED        (1u << 1) /* was LOCAL but downgraded to SHARED by escape analysis */
+/* Per-entry flags.
+ *  - Neither flag on a LOCAL entry means "escape-proof automatic" (register
+ *    spill / address provably never taken): relaxes with NO runtime guard.
+ *    This must NOT be used for module-scope "only this module touches it"
+ *    proofs, which are not robust to dlopen/JIT/self-modifying guest code —
+ *    those are guard-required. (See docs/box64-fex-integration.md Layer 3.)
+ *  - GUARD_REQUIRED: a LOCAL *hint* that only relaxes if a runtime ownership/
+ *    MTE guard confirms it; otherwise it orders (fail-safe).
+ *  - ESCAPED: escape analysis found this LOCAL-form access can be shared -> it
+ *    is treated as SHARED (ordered) regardless of the LOCAL class byte. */
+#define OMC_EF_GUARD_REQUIRED (1u << 0)
+#define OMC_EF_ESCAPED        (1u << 1)
 
 /* The ordering the translator must emit for an access. */
 enum oryx_order {
@@ -69,6 +78,8 @@ struct oryx_mmap {
 
 /* ---- format ------------------------------------------------------------- */
 int  oryx_mmap_serialize(const struct oryx_mmap *m, uint8_t **out, size_t *out_len);
+/* `out` must be a fresh or freed struct — parse overwrites it and allocates
+ * `entries` (free with oryx_mmap_free); it does not free prior contents. */
 int  oryx_mmap_parse(const uint8_t *buf, size_t len, struct oryx_mmap *out);
 void oryx_mmap_free(struct oryx_mmap *m);
 
@@ -80,10 +91,11 @@ const struct oryx_mmap_entry *oryx_mmap_lookup(const struct oryx_mmap *m, uint64
  * The one place the soundness contract lives. `e` may be NULL (no entry).
  * `guard_confirmed` is whether a runtime ownership/MTE guard has confirmed the
  * access is currently thread-local.
- *   ATOMIC                          -> ORYX_ORD_ATOMIC
- *   LOCAL, no guard required        -> ORYX_ORD_RELAX
- *   LOCAL, guard required + confirmed-> ORYX_ORD_RELAX
- *   LOCAL, guard required + NOT confirmed -> ORYX_ORD_TSO   (fail safe)
+ *   ATOMIC                                 -> ORYX_ORD_ATOMIC
+ *   LOCAL + ESCAPED                        -> ORYX_ORD_TSO   (downgraded to shared)
+ *   LOCAL, escape-proof (no guard flag)    -> ORYX_ORD_RELAX
+ *   LOCAL, guard required + confirmed      -> ORYX_ORD_RELAX
+ *   LOCAL, guard required + NOT confirmed  -> ORYX_ORD_TSO   (fail safe)
  *   SHARED / UNKNOWN / NULL / anything else -> ORYX_ORD_TSO
  */
 enum oryx_order oryx_mmap_decide(const struct oryx_mmap_entry *e, int guard_confirmed);
@@ -91,7 +103,7 @@ enum oryx_order oryx_mmap_decide(const struct oryx_mmap_entry *e, int guard_conf
 /* ---- identity verification (fail closed on mismatch) -------------------- */
 int oryx_mmap_verify_identity(const struct oryx_mmap *m,
 			      const uint8_t module_hash[SHA256_DIGEST_LEN],
-			      uint32_t analyzer_version, uint32_t isa_id);
+			      uint32_t analyzer_id, uint32_t analyzer_version, uint32_t isa_id);
 
 /* Logical key for cache storage = hash(module_hash ‖ analyzer_id ‖ version ‖ isa). */
 void oryx_mmap_logical_key(const struct oryx_mmap *m, char hex[SHA256_HEX_LEN + 1]);

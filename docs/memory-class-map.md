@@ -23,8 +23,16 @@ speed**. So the map and its consumer are built to **never relax on doubt**:
 | `LOCAL`, no guard required (statically proven) | — | **relax** (plain weak) |
 | `LOCAL`, guard required | confirmed | **relax** |
 | `LOCAL`, guard required | not confirmed | **ordered** (fail-safe) |
+| `LOCAL`, **ESCAPED** (escape analysis found it can be shared) | — | **ordered** (downgraded to shared) |
 | `SHARED` | — | ordered |
 | `UNKNOWN` / no entry / unparsable / identity mismatch | — | ordered |
+
+The `ESCAPED` flag overrides the `LOCAL` class byte unconditionally: escape analysis is the writer
+side of the contract, so if the off-device pass ever finds a `LOCAL`-form access can leak, it
+stamps `ESCAPED` and the access orders regardless of any guard. "Escape-proof automatic" (the
+guard-free relax row) is reserved for accesses whose address is *provably never taken* — register
+spills, statically-resolved frame slots — never a module-scope "only this module touches it"
+argument, which is not robust to `dlopen`/JIT/self-modifying guest code.
 
 This is exactly `oryx_mmap_decide()` — the single function where the contract lives. An offline
 `LOCAL` is only ever a **hint**: it relaxes ordering only when the analysis needed no runtime

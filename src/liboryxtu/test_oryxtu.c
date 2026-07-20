@@ -271,6 +271,56 @@ static void test_exact_tso_mapping(void)
 	oryx_tu_free(&tu); oryx_tu_free(&sc);
 }
 
+static void test_rcpc_mapping(void)
+{
+	printf("test: RCpc mapping (LDAPR/STLR = cheapest exact-TSO on FEAT_LRCPC)\n");
+	struct oryx_ginsn b[4]; size_t n = 0;
+	b[n++] = (struct oryx_ginsn){ .op = GOP_LOAD,  .rd = GR_RAX, .rn = GR_RDI, .imm = 0, .mclass = ORYX_MCLASS_SHARED };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_STORE, .rd = GR_RAX, .rn = GR_RSI, .imm = 0, .mclass = ORYX_MCLASS_SHARED };
+	b[n++] = (struct oryx_ginsn){ .op = GOP_RET };
+
+	struct oryx_tu tu;
+	CHECK(oryx_translate_ex(b, n, 0x6000, 16, 4, ORYX_POLICY_DRF, ORYX_ORDER_RCPC, &tu, NULL) == ORYX_OK, "rcpc translate");
+	CHECK(word_at(&tu, 0) == 0xF8BFC0E0u, "LDAPR X0,[X7] (exact-TSO acquire load)");
+	CHECK(word_at(&tu, 4) == 0xC89FFCC0u, "STLR X0,[X6]  (release store)");
+	CHECK(word_at(&tu, 8) == 0xD65F03C0u, "RET");
+	oryx_tu_free(&tu);
+
+	/* The three ordered strengths must produce three DIFFERENT content addresses
+	 * (proves the guest hash folds in `strength` — the cache-aliasing fix). */
+	struct oryx_tu sc, tso; uint8_t *xa, *xb, *xc; size_t la, lb, lc; char aa[65], ab[65], ac[65];
+	oryx_translate_ex(b, n, 0x6000, 16, 4, ORYX_POLICY_DRF, ORYX_ORDER_RCPC, &tu, NULL);
+	oryx_translate_ex(b, n, 0x6000, 16, 4, ORYX_POLICY_DRF, ORYX_ORDER_SC, &sc, NULL);
+	oryx_translate_ex(b, n, 0x6000, 16, 4, ORYX_POLICY_DRF, ORYX_ORDER_TSO, &tso, NULL);
+	oryx_tu_serialize(&tu, &xa, &la); oryx_tu_serialize(&sc, &xb, &lb); oryx_tu_serialize(&tso, &xc, &lc);
+	oryx_content_address(xa, la, aa); oryx_content_address(xb, lb, ab); oryx_content_address(xc, lc, ac);
+	CHECK(strcmp(aa, ab) != 0 && strcmp(aa, ac) != 0 && strcmp(ab, ac) != 0,
+	      "RCPC/SC/TSO strengths => distinct content addresses (no aliasing)");
+	free(xa); free(xb); free(xc);
+	oryx_tu_free(&tu); oryx_tu_free(&sc); oryx_tu_free(&tso);
+}
+
+static void test_hash_folds_mclass(void)
+{
+	printf("test: guest hash folds in mclass (cache-aliasing regression)\n");
+	struct oryx_ginsn local[2] = {
+		{ .op = GOP_LOAD, .rd = GR_RAX, .rn = GR_RDI, .imm = 0, .mclass = ORYX_MCLASS_LOCAL },
+		{ .op = GOP_RET },
+	};
+	struct oryx_ginsn shared[2] = {
+		{ .op = GOP_LOAD, .rd = GR_RAX, .rn = GR_RDI, .imm = 0, .mclass = ORYX_MCLASS_SHARED },
+		{ .op = GOP_RET },
+	};
+	struct oryx_tu a, b; char ka[65], kb[65];
+	oryx_translate(local, 2, 0x7000, 8, 5, &a);   /* DRF: LOCAL -> weak LDR */
+	oryx_translate(shared, 2, 0x7000, 8, 5, &b);  /* DRF: SHARED -> ordered LDAR */
+	CHECK(word_at(&a, 0) != word_at(&b, 0), "the two blocks really do emit different code");
+	oryx_tu_logical_key(&a, ka);
+	oryx_tu_logical_key(&b, kb);
+	CHECK(strcmp(ka, kb) != 0, "different mclass => different logical key (NO collision)");
+	oryx_tu_free(&a); oryx_tu_free(&b);
+}
+
 int main(void)
 {
 	test_encodings();
@@ -281,6 +331,8 @@ int main(void)
 	test_memory_model();
 	test_barrier_reduction();
 	test_exact_tso_mapping();
+	test_rcpc_mapping();
+	test_hash_folds_mclass();
 	printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;
 }

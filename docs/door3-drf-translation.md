@@ -72,26 +72,36 @@ overrides (Part C).
 
 ## Strength selection (use the cheapest *correct* primitive)
 
-> **Correction (verified against the ARM memory model).** An earlier draft claimed `LDAPR`
-> (RCpc) + `STLR` equals x86-TSO. **It does not — RCpc is strictly *weaker* than TSO.** RCpc
-> relaxes multi-copy atomicity, so `LDAPR` can read a store-release value not yet globally
-> observed, permitting **WRC-style causality violations that x86-TSO forbids** (x86-TSO is
-> multi-copy atomic). So bare `LDAPR` is **unsound** for SHARED accesses.
+> **Note on the exact-TSO mapping (settled against the ARMv8 axiomatic model).** `LDAPR`
+> (RCpc) + `STLR` **is** the minimal exact-TSO load/store mapping — this is the primary choice,
+> and it is what FEX emits in production for TSO loads. The reasoning: ARMv8 is *other*-multi-copy
+> atomic, and `LDAPR`/`STLR` preserve that — WRC and IRIW stay **forbidden** under this mapping.
+> RCpc differs from RCsc (`LDAR`) by exactly one edge: it drops the `STLR`→`LDAPR` (store-release →
+> load-acquire, i.e. **W→R**) ordering. But W→R reordering — the store-buffer / `SB` outcome — is
+> *precisely* what x86-TSO already permits. So `LDAPR`/`STLR` = SC **minus** the one relaxation TSO
+> also makes = exactly x86-TSO. (An earlier draft "corrected" this to claim `LDAPR` breaks
+> multi-copy atomicity and violates WRC. That correction was wrong: it confused C++ `seq_cst`
+> folklore — where the distinguishing failure *is* `SB`, a test TSO permits — with TSO emulation,
+> where `SB` is allowed and WRC/IRIW remain forbidden. `LDAPR`/`STLR` is sound for SHARED accesses.)
 
-The two correct choices for a SHARED access are:
+The three correct choices for a SHARED access, cheapest first:
 
-- **Minimal exact-TSO — the DMB-fence scheme** (Arancini-proven, multi-copy-atomic on ARMv8):
-  load → `LDR; DMB ISHLD`, store → `DMB ISHST; STR`, `MFENCE` → `DMB ISH`. Each fence is proven
-  necessary-and-sufficient, and adjacent fences can be merged/eliminated. This preserves exactly
-  the W→R relaxation TSO allows.
-- **Conservative — acquire/release** `LDAR`(RCsc)/`STLR`: *stronger* than TSO (it also forbids
+- **Exact-TSO, cheapest — acquire-RCpc/release** `LDAPR`(RCpc)/`STLR`: **exactly** x86-TSO, zero
+  extra instructions. Needs `FEAT_LRCPC` (ARMv8.3; Oryon has it). The primary mapping on the
+  target hardware.
+- **Conservative — acquire-RCsc/release** `LDAR`(RCsc)/`STLR`: *stronger* than TSO (it also forbids
   the W→R reorder, i.e. it's sequentially consistent for those accesses) — correct, simpler, but
-  over-costs. **This is what the reference `liboryxtu` emits** — safe by construction, and the
-  right baseline for differential correctness testing.
+  over-costs by keeping an ordering TSO does not require. **This is the reference `liboryxtu`
+  default** — safe by construction, works on ARMv8.0, and the right baseline for differential
+  correctness testing. Caveat: `LDAR`/`STLR` require natural alignment, so a *maybe-unaligned*
+  SHARED access must fall back to RCpc or the DMB scheme, not SC.
+- **Exact-TSO fallback — the DMB-fence scheme** (Arancini-proven, multi-copy-atomic on ARMv8, for
+  pre-8.3 cores without `FEAT_LRCPC`): load → `LDR; DMB ISHLD`, store → `DMB ISHST; STR`,
+  `MFENCE` → `DMB ISH`. Each fence is proven necessary-and-sufficient, and adjacent fences can be
+  merged/eliminated. Preserves exactly the W→R relaxation TSO allows.
 
-`LDAPR` is only usable in a mapping that *separately* restores multi-copy atomicity; it is not a
-drop-in "cheaper LDAR." See [`docs/box64-fex-integration.md`](box64-fex-integration.md) §4 for
-the full mapping table and the special cases (`MOVNT*`, mixed-size, `REP` string ops).
+See [`docs/box64-fex-integration.md`](box64-fex-integration.md) §4 for the full mapping table and
+the special cases (`MOVNT*`, mixed-size, `REP` string ops).
 
 ## Expected win
 

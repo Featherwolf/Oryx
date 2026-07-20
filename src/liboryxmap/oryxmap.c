@@ -121,8 +121,10 @@ enum oryx_order oryx_mmap_decide(const struct oryx_mmap_entry *e, int guard_conf
 	case OMC_ATOMIC:
 		return ORYX_ORD_ATOMIC;
 	case OMC_LOCAL:
+		if (e->eflags & OMC_EF_ESCAPED)
+			return ORYX_ORD_TSO;     /* escape found -> treat as shared */
 		if (!(e->eflags & OMC_EF_GUARD_REQUIRED))
-			return ORYX_ORD_RELAX;   /* statically proven local */
+			return ORYX_ORD_RELAX;   /* escape-proof automatic (guard-free) */
 		return guard_confirmed ? ORYX_ORD_RELAX : ORYX_ORD_TSO;  /* fail safe */
 	case OMC_SHARED:
 	case OMC_UNKNOWN:
@@ -134,13 +136,14 @@ enum oryx_order oryx_mmap_decide(const struct oryx_mmap_entry *e, int guard_conf
 /* ---- identity ------------------------------------------------------------ */
 int oryx_mmap_verify_identity(const struct oryx_mmap *m,
 			      const uint8_t module_hash[SHA256_DIGEST_LEN],
-			      uint32_t analyzer_version, uint32_t isa_id)
+			      uint32_t analyzer_id, uint32_t analyzer_version, uint32_t isa_id)
 {
 	if (!m || !module_hash)
 		return ORYX_ERR_INVAL;
 	if (memcmp(m->module_hash, module_hash, SHA256_DIGEST_LEN) != 0)
 		return ORYX_ERR_INTEGRITY;
-	if (m->analyzer_version != analyzer_version || m->isa_id != isa_id)
+	if (m->analyzer_id != analyzer_id ||
+	    m->analyzer_version != analyzer_version || m->isa_id != isa_id)
 		return ORYX_ERR_INTEGRITY;
 	return ORYX_OK;
 }
@@ -169,7 +172,10 @@ int oryx_mmap_classify(const struct oryx_ginsn *ops, size_t n, uint64_t guest_pc
 	out->isa_id = isa_id;
 	out->analyzer_id = analyzer_id;
 	out->analyzer_version = analyzer_version;
-	sha256(module_ident ? module_ident : "", module_ident_len, out->module_hash);
+	/* Guard both pointer AND length: a NULL ident hashes the empty string, never
+	 * a NULL+len OOB read. */
+	sha256(module_ident ? module_ident : (const void *)"",
+	       module_ident ? module_ident_len : 0, out->module_hash);
 
 	struct oryx_mmap_entry *ents = calloc(n ? n : 1, sizeof(*ents));
 	if (!ents)
@@ -250,7 +256,7 @@ int oryx_mmap_cache_get(struct oryx_cache *c,
 	if (rc != ORYX_OK)
 		return rc;
 	/* Fail closed if the stored map's identity doesn't match what we asked for. */
-	rc = oryx_mmap_verify_identity(out, module_hash, analyzer_version, isa_id);
+	rc = oryx_mmap_verify_identity(out, module_hash, analyzer_id, analyzer_version, isa_id);
 	if (rc != ORYX_OK) {
 		oryx_mmap_free(out);
 		return rc;

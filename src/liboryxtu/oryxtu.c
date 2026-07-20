@@ -25,7 +25,8 @@ static uint32_t enc_str(int rt,int rn,uint32_t imm12){ return 0xF9000000u | ((im
 static uint32_t enc_b(void)                { return 0x14000000u; }                 /* B +0 (patched)     */
 static uint32_t enc_bcond(int cond)        { return 0x54000000u | ((uint32_t)cond & 0xf); } /* B.cond +0 (patched) */
 /* --- Door 3: ordered / synchronization forms --- */
-static uint32_t enc_ldar(int rt,int rn)    { return 0xC8DFFC00u | ((uint32_t)rn<<5) | (uint32_t)rt; } /* LDAR Xt,[Xn] (RCsc: correct-but-SC conservative; NOT bare LDAPR — RCpc is weaker than TSO) */
+static uint32_t enc_ldar(int rt,int rn)    { return 0xC8DFFC00u | ((uint32_t)rn<<5) | (uint32_t)rt; } /* LDAR  Xt,[Xn] (RCsc: SC, stronger than TSO — safe conservative) */
+static uint32_t enc_ldapr(int rt,int rn)   { return 0xF8BFC000u | ((uint32_t)rn<<5) | (uint32_t)rt; } /* LDAPR Xt,[Xn] (RCpc, FEAT_LRCPC: EXACT TSO load — cheapest correct) */
 static uint32_t enc_stlr(int rt,int rn)    { return 0xC89FFC00u | ((uint32_t)rn<<5) | (uint32_t)rt; } /* STLR  Xt,[Xn] */
 static uint32_t enc_add_imm(int rd,int rn,uint32_t imm12){ return 0x91000000u | ((imm12&0xfffu)<<10) | ((uint32_t)rn<<5) | (uint32_t)rd; } /* ADD Xd,Xn,#imm */
 static uint32_t enc_ldaddal(int rs,int rt,int rn){ return 0xF8E00000u | ((uint32_t)rs<<16) | ((uint32_t)rn<<5) | (uint32_t)rt; } /* LDADDAL Xs,Xt,[Xn] */
@@ -74,22 +75,30 @@ static int buf_emit32(struct buf *b, uint32_t insn)
 	return ORYX_OK;
 }
 
-/* ---- guest-block hashing (source identity) ------------------------------- */
-static void hash_block(const struct oryx_ginsn *ops, size_t n,
-		       uint64_t guest_pc, uint8_t out[SHA256_DIGEST_LEN])
+/* ---- guest-block hashing (codegen identity) ------------------------------ */
+/*
+ * Folds in EVERYTHING that affects emitted bytes: entry pc, the memory-model
+ * policy + ordering strength, and every op INCLUDING its mclass. Omitting
+ * mclass/policy/strength was a cache-aliasing bug (two blocks that lower to
+ * different host code — e.g. weak LDR vs ordered LDAR — could share a key).
+ */
+static void hash_block(const struct oryx_ginsn *ops, size_t n, uint64_t guest_pc,
+		       int policy, int strength, uint8_t out[SHA256_DIGEST_LEN])
 {
-	/* Canonical little-endian encoding of the IR + entry pc. */
 	sha256_ctx c;
 	sha256_init(&c);
-	uint8_t hdr[8];
+	uint8_t hdr[16];
 	for (int i = 0; i < 8; i++) hdr[i] = (uint8_t)(guest_pc >> (8*i));
-	sha256_update(&c, hdr, 8);
+	hdr[8]  = (uint8_t)policy;
+	hdr[9]  = (uint8_t)strength;
+	hdr[10] = hdr[11] = hdr[12] = hdr[13] = hdr[14] = hdr[15] = 0;
+	sha256_update(&c, hdr, sizeof(hdr));
 	for (size_t i = 0; i < n; i++) {
-		uint8_t rec[7*4]; size_t o = 0;
+		uint8_t rec[8*4]; size_t o = 0;
 		#define P32(v) do { uint32_t _v=(uint32_t)(v); rec[o++]=_v; rec[o++]=_v>>8; rec[o++]=_v>>16; rec[o++]=_v>>24; } while(0)
 		P32(ops[i].op); P32(ops[i].rd); P32(ops[i].rn);
 		P32((uint32_t)ops[i].imm); P32((uint32_t)((uint64_t)ops[i].imm>>32));
-		P32((uint32_t)ops[i].target); P32(ops[i].cc);
+		P32((uint32_t)ops[i].target); P32(ops[i].cc); P32(ops[i].mclass);
 		#undef P32
 		sha256_update(&c, rec, o);
 	}
@@ -193,8 +202,10 @@ int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 					st.ordered_stores++;
 				}
 			} else {
-				/* SC acquire/release (LDAR/STLR): address must be in a register,
-				 * so a nonzero displacement costs an extra ADD (imm 0..4095). */
+				/* acquire/release: address must be in a register, so a nonzero
+				 * displacement costs an extra ADD (imm 0..4095). Load form depends
+				 * on strength: RCPC -> LDAPR (exact TSO), SC -> LDAR (stronger).
+				 * Store is STLR for both. */
 				int base = in->rn;
 				if (in->imm < 0 || in->imm > 0xFFF)
 					FAIL(ORYX_ERR_INVAL);
@@ -202,8 +213,14 @@ int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 					EMIT(enc_add_imm(ORYX_SCRATCH, in->rn, (uint32_t)in->imm));
 					base = ORYX_SCRATCH;
 				}
-				if (in->op == GOP_LOAD) { EMIT(enc_ldar(in->rd, base)); st.ordered_loads++; }
-				else                    { EMIT(enc_stlr(in->rd, base)); st.ordered_stores++; }
+				if (in->op == GOP_LOAD) {
+					EMIT(strength == ORYX_ORDER_RCPC ? enc_ldapr(in->rd, base)
+									 : enc_ldar(in->rd, base));
+					st.ordered_loads++;
+				} else {
+					EMIT(enc_stlr(in->rd, base));
+					st.ordered_stores++;
+				}
 			}
 			break;
 		}
@@ -253,7 +270,7 @@ int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 	out->flags = 0;
 	out->guest_entry_pc = guest_pc;
 	out->guest_len = guest_len;
-	hash_block(ops, n, guest_pc, out->guest_hash);
+	hash_block(ops, n, guest_pc, (int)policy, (int)strength, out->guest_hash);
 	out->code = code.p;
 	out->code_len = (uint32_t)code.len;
 	out->relocs = relocs;

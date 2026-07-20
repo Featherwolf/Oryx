@@ -152,10 +152,11 @@ static void test_identity_and_cache(void)
 
 	/* Identity checks. */
 	uint8_t wrong[32]; memcpy(wrong, m.module_hash, 32); wrong[0] ^= 1;
-	CHECK(oryx_mmap_verify_identity(&m, m.module_hash, m.analyzer_version, m.isa_id) == ORYX_OK, "identity match");
-	CHECK(oryx_mmap_verify_identity(&m, wrong, m.analyzer_version, m.isa_id) == ORYX_ERR_INTEGRITY, "wrong module hash rejected");
-	CHECK(oryx_mmap_verify_identity(&m, m.module_hash, 999, m.isa_id) == ORYX_ERR_INTEGRITY, "wrong analyzer version rejected");
-	CHECK(oryx_mmap_verify_identity(&m, m.module_hash, m.analyzer_version, 0xdead) == ORYX_ERR_INTEGRITY, "wrong isa rejected");
+	CHECK(oryx_mmap_verify_identity(&m, m.module_hash, m.analyzer_id, m.analyzer_version, m.isa_id) == ORYX_OK, "identity match");
+	CHECK(oryx_mmap_verify_identity(&m, wrong, m.analyzer_id, m.analyzer_version, m.isa_id) == ORYX_ERR_INTEGRITY, "wrong module hash rejected");
+	CHECK(oryx_mmap_verify_identity(&m, m.module_hash, 0xbadbad, m.analyzer_version, m.isa_id) == ORYX_ERR_INTEGRITY, "wrong analyzer id rejected");
+	CHECK(oryx_mmap_verify_identity(&m, m.module_hash, m.analyzer_id, 999, m.isa_id) == ORYX_ERR_INTEGRITY, "wrong analyzer version rejected");
+	CHECK(oryx_mmap_verify_identity(&m, m.module_hash, m.analyzer_id, m.analyzer_version, 0xdead) == ORYX_ERR_INTEGRITY, "wrong isa rejected");
 
 	/* Wrong-identity cache get -> not found (different logical key). */
 	CHECK(oryx_mmap_cache_get(&c, wrong, m.analyzer_id, m.analyzer_version, m.isa_id, &got) == ORYX_ERR_NOTFOUND,
