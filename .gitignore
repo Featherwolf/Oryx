@@ -1,8 +1,22 @@
 # Build artifacts
-experiments/**/mp_litmus
 *.o
+*.a
 *.out
 *.ko
+
+# Built binaries (no extension, so listed explicitly)
+experiments/phase0-tso-probe/litmus/oryx_litmus
+src/liboryxmm/oryxmm_demo
+src/liboryxcache/test_oryxcache
+src/liboryxcache/oryxcache
+src/liboryxtu/test_oryxtu
+src/liboryxprofile/test_profile
+src/liboryxprofile/oryxprofile
+
+# Test scratch
+**/_testcache
+**/_tucache
+**/_testprofiles
 
 # Editor / OS
 .DS_Store
