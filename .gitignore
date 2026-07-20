@@ -27,3 +27,6 @@ src/liboryxdec/test_oryxdec_a64
 # Editor / OS
 .DS_Store
 *.swp
+
+# perf probe binary
+experiments/perf-probe/oryx-perf
