@@ -1,0 +1,9 @@
+# Build artifacts
+experiments/**/mp_litmus
+*.o
+*.out
+*.ko
+
+# Editor / OS
+.DS_Store
+*.swp
