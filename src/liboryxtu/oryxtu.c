@@ -58,6 +58,9 @@ static uint32_t enc_dmb(int fence)         { /* DMB ISH / ISHLD / ISHST */
 /* Scratch register for computing effective addresses of ordered accesses
  * (guest regs map to x0..x15; x16/IP0 is free). */
 #define ORYX_SCRATCH 16
+/* Host x17 is the dispatcher's "next guest PC" out-register (see liboryxrun's
+ * trampoline). GOP_X86RET loads the popped return address straight into it. */
+#define ORYX_NEXTPC  17
 
 /* x86 condition -> AArch64 B.cond condition field. */
 static int arm_cond(int gcc)
@@ -303,6 +306,30 @@ int oryx_translate_ex(const struct oryx_ginsn *ops, size_t n,
 					FAIL(ORYX_ERR_NOMEM);
 				EMIT(enc_subs_cmp(in->rd, ORYX_SCRATCH));
 			}
+			break;
+		case GOP_PUSH:                     /* RSP -= 8 ; [RSP] = rd */
+			EMIT(enc_sub_imm(GR_RSP, GR_RSP, 8));
+			EMIT(enc_str(in->rd, GR_RSP, 0));
+			break;
+		case GOP_POP:                      /* rd = [RSP] ; RSP += 8 */
+			EMIT(enc_ldr(in->rd, GR_RSP, 0));
+			EMIT(enc_add_imm(GR_RSP, GR_RSP, 8));
+			break;
+		case GOP_CALL:                     /* push retpc(imm) ; goto target (terminates) */
+			if (emit_movimm(&code, ORYX_SCRATCH, (uint64_t)in->imm) != ORYX_OK)
+				FAIL(ORYX_ERR_NOMEM);
+			EMIT(enc_sub_imm(GR_RSP, GR_RSP, 8));
+			EMIT(enc_str(ORYX_SCRATCH, GR_RSP, 0));
+			ADD_RELOC((uint32_t)code.len, ORYX_RELOC_BRANCH_GUEST_PC, in->target);
+			EMIT(enc_b());
+			ADD_EXIT(in->target);
+			terminated = 1;
+			break;
+		case GOP_X86RET:                   /* nextPC = [RSP] -> x17 ; RSP += 8 ; RET */
+			EMIT(enc_ldr(ORYX_NEXTPC, GR_RSP, 0));
+			EMIT(enc_add_imm(GR_RSP, GR_RSP, 8));
+			EMIT(enc_ret());
+			terminated = 1;
 			break;
 		case GOP_TEST_RR: EMIT(enc_tst_rr(in->rd, in->rn)); break;   /* flags = rd & rn */
 		case GOP_AND_RR:  EMIT(enc_ands_rr(in->rd, in->rd, in->rn)); break;  /* x86 AND sets flags */

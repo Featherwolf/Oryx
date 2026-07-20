@@ -37,6 +37,16 @@ static const uint8_t fib_code[] = {
 	0x00, 0x00, 0x00, 0xeb, 0xf5,
 };
 
+/* gcc -O1: two functions with a real (non-inlined) call, exercising CALL/RET and
+ * PUSH/POP. callee@0 = `lea -1(%rdi),%rax; ret`; caller@5 saves rbx/rbp, calls
+ * callee twice (on n and n+5) and sums -> caller(n) = (n-1)+(n+4) = 2n+3. The two
+ * `call` rel32s are patched to target callee@0 (the .o left them relocatable). */
+static const uint8_t callpair_code[] = {
+	0x48, 0x8d, 0x47, 0xff, 0xc3, 0x55, 0x53, 0x48, 0x89, 0xfb, 0xe8, 0xf1,
+	0xff, 0xff, 0xff, 0x48, 0x89, 0xc5, 0x48, 0x8d, 0x7b, 0x05, 0xe8, 0xe5,
+	0xff, 0xff, 0xff, 0x48, 0x01, 0xe8, 0x5b, 0x5d, 0xc3,
+};
+
 #define GBASE 0x400000ull
 
 /* ---- decode-level checks (arch-independent) ----------------------------- */
@@ -104,12 +114,18 @@ static long run_fn(const uint8_t *code, size_t code_len, long arg)
 {
 	struct oryx_x86_image img = { code, code_len, GBASE };
 	struct oryx_guest g = {0};
-	g.regs[GR_RDI] = (uint64_t)arg;             /* System V: first arg in RDI */
+	/* A call stack, with a HALT sentinel as the outer function's return address:
+	 * the final x86 RET pops it and the dispatcher stops. (System V: arg in RDI,
+	 * result in RAX.) The stack must be disjoint from the register file. */
+	static uint64_t stack[512];
+	stack[511] = ORYX_HALT_PC;
+	g.regs[GR_RSP] = (uint64_t)(uintptr_t)&stack[511];
+	g.regs[GR_RDI] = (uint64_t)arg;
 	uint64_t steps = 0;
 	int rc = oryx_run_program(oryx_x86_fetch, &img, ORYX_POLICY_DRF, ORYX_ORDER_SC,
 				  GBASE, &g, 1000000, &steps);
 	if (rc != ORYX_OK) return -0x0BADBEEF;
-	return (long)g.regs[GR_RAX];                /* System V: return in RAX */
+	return (long)g.regs[GR_RAX];
 }
 
 static void test_execute(void)
@@ -128,11 +144,36 @@ static void test_execute(void)
 	CHECK((uint64_t)run_fn(fib_code, sizeof(fib_code), 100) == 3736710778780434371ull, "fib(100) = full 64-bit overflow value");
 }
 
+static void test_calls(void)
+{
+	printf("test: CALL/RET/PUSH/POP — a real two-function compiled program\n");
+	/* Entry at caller (offset 5). caller(n) = 2n+3. */
+	const uint64_t caller_pc = GBASE + 5;
+	long expect[][2] = { {10, 23}, {100, 203}, {0, 3}, {7, 17} };
+	for (unsigned i = 0; i < 4; i++) {
+		struct oryx_x86_image img = { callpair_code, sizeof(callpair_code), GBASE };
+		struct oryx_guest g = {0};
+		static uint64_t stack[512];
+		stack[511] = ORYX_HALT_PC;
+		g.regs[GR_RSP] = (uint64_t)(uintptr_t)&stack[511];
+		g.regs[GR_RDI] = (uint64_t)expect[i][0];
+		uint64_t steps = 0;
+		int rc = oryx_run_program(oryx_x86_fetch, &img, ORYX_POLICY_DRF, ORYX_ORDER_SC,
+					  caller_pc, &g, 1000000, &steps);
+		char msg[64];
+		snprintf(msg, sizeof(msg), "caller(%ld) = %ld (2n+3, via two real calls)", expect[i][0], expect[i][1]);
+		CHECK(rc == ORYX_OK && (long)g.regs[GR_RAX] == expect[i][1], msg);
+		/* RSP must be balanced back to the sentinel slot after all push/pop/call/ret. */
+		CHECK(g.regs[GR_RSP] == (uint64_t)(uintptr_t)&stack[512], "stack balanced (RSP restored past sentinel)");
+	}
+}
+
 int main(void)
 {
 	test_decode();
 	if (oryx_run_supported()) {
 		test_execute();
+		test_calls();
 	} else {
 		printf("(execution tests skipped: host is not AArch64 — run under qemu-aarch64)\n");
 	}

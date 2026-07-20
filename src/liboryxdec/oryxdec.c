@@ -205,7 +205,24 @@ int oryx_x86_decode_block(const struct oryx_x86_image *img, uint64_t pc,
 			break;
 		}
 
+		/* ---- stack (PUSH/POP r64; 64-bit by default, REX.W irrelevant) ---- */
+		case 0x50: case 0x51: case 0x52: case 0x53:
+		case 0x54: case 0x55: case 0x56: case 0x57:
+			EMIT(((struct oryx_ginsn){ .op = GOP_PUSH, .rd = (op - 0x50) | (rexB << 3) }));
+			break;
+		case 0x58: case 0x59: case 0x5A: case 0x5B:
+		case 0x5C: case 0x5D: case 0x5E: case 0x5F:
+			EMIT(((struct oryx_ginsn){ .op = GOP_POP, .rd = (op - 0x58) | (rexB << 3) }));
+			break;
+
 		/* ---- control flow (terminators) ---- */
+		case 0xE8: { /* CALL rel32 */
+			if (off + 4 > img->len) return ORYX_ERR_FORMAT;
+			int64_t rel = (int32_t)rd_u32(&img->bytes[off]); off += 4; cur += 4;
+			EMIT(((struct oryx_ginsn){ .op = GOP_CALL, .target = cur + (uint64_t)rel, .imm = (int64_t)cur }));
+			done = 1;                        /* imm = return address (next insn) */
+			break;
+		}
 		case 0x70: case 0x71: case 0x72: case 0x73:
 		case 0x74: case 0x75: case 0x76: case 0x77:
 		case 0x78: case 0x79: case 0x7A: case 0x7B:
@@ -245,8 +262,8 @@ int oryx_x86_decode_block(const struct oryx_x86_image *img, uint64_t pc,
 			done = 1;
 			break;
 		}
-		case 0xC3: /* RET */
-			EMIT(((struct oryx_ginsn){ .op = GOP_RET }));
+		case 0xC3: /* RET — pop return address into the dispatcher's next-PC */
+			EMIT(((struct oryx_ginsn){ .op = GOP_X86RET }));
 			done = 1;
 			break;
 

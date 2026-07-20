@@ -62,7 +62,12 @@ enum oryx_gop {
 	GOP_XOR_RR,      /* rd = rd ^ rn                     -> EOR               */
 	GOP_AND_RR,      /* rd = rd & rn                     -> AND               */
 	GOP_OR_RR,       /* rd = rd | rn                     -> ORR               */
-	GOP_LEA          /* rd = rn + imm  (x86 LEA base+disp) -> ADD/SUB #imm    */
+	GOP_LEA,         /* rd = rn + imm  (x86 LEA base+disp) -> ADD/SUB #imm    */
+	/* --- stack + calls (RSP = guest reg 4, used as a real host pointer) --- */
+	GOP_PUSH,        /* RSP -= 8; [RSP] = rd    (x86 PUSH r64)               */
+	GOP_POP,         /* rd = [RSP]; RSP += 8    (x86 POP r64)                */
+	GOP_CALL,        /* [RSP-8]=imm(retpc); RSP-=8; goto target ; terminates */
+	GOP_X86RET       /* nextPC = [RSP]; RSP += 8 ; terminates (x86 RET)      */
 };
 
 /*
